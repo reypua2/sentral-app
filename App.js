@@ -15,6 +15,7 @@ import {
   KeyboardAvoidingView,
 } from 'react-native';
 import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system';
 
 const { width } = Dimensions.get('window');
 
@@ -695,7 +696,6 @@ function VoiceAssistant({ visible, onClose }) {
       recordingRef.current = null;
 
       // Read audio file as base64
-      const { FileSystem } = await import('expo-file-system');
       const base64Audio = await FileSystem.readAsStringAsync(uri, {
         encoding: FileSystem.EncodingType.Base64,
       });
@@ -758,7 +758,6 @@ function VoiceAssistant({ visible, onClose }) {
         playsInSilentModeIOS: true,
       });
 
-      const { FileSystem } = await import('expo-file-system');
       const fileUri = FileSystem.cacheDirectory + 'sentralis_reply.mp3';
       await FileSystem.writeAsStringAsync(fileUri, base64mp3, {
         encoding: FileSystem.EncodingType.Base64,
