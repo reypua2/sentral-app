@@ -1,5 +1,7 @@
 import { StatusBar } from 'expo-status-bar';
 import { useState, useEffect, useRef, useCallback } from 'react';
+import * as Notifications from 'expo-notifications';
+import * as Device from 'expo-device';
 import {
   StyleSheet,
   Text,
@@ -13,9 +15,10 @@ import {
   RefreshControl,
   TextInput,
   KeyboardAvoidingView,
+  PanResponder,
 } from 'react-native';
 import { Audio } from 'expo-av';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 
 const { width } = Dimensions.get('window');
 
@@ -283,6 +286,14 @@ function formatTime(raw) {
   return s; // fallback
 }
 
+// Formats ISO date string to "14 May 2026" style
+function formatDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso + 'T00:00:00');
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
+}
+
 function PriorityLegend() {
   return (
     <View style={s.legendRow}>
@@ -442,7 +453,7 @@ function TaskCard({ task, index, onComplete }) {
           <Text style={[s.taskTitle, isDone && s.taskTitleDone]}>{task.title}</Text>
           {task.detail ? <Text style={s.taskDetail}>{task.detail}</Text> : null}
           <View style={s.taskMeta}>
-            {task.dueDate ? <Text style={[s.taskDue, overdue && { color: C.critical }, dueToday && { color: C.important }]}>📅 Due: {task.dueDate}</Text> : null}
+            {task.dueDate ? <Text style={[s.taskDue, overdue && { color: C.critical }, dueToday && { color: C.important }]}>📅 Due: {formatDate(task.dueDate)}</Text> : null}
             {task.assignedTo ? <Text style={s.taskAssigned}>👤 {task.assignedTo}</Text> : null}
           </View>
         </View>
@@ -697,7 +708,7 @@ function VoiceAssistant({ visible, onClose }) {
 
       // Read audio file as base64
       const base64Audio = await FileSystem.readAsStringAsync(uri, {
-        encoding: FileSystem.EncodingType.Base64,
+        encoding: 'base64',
       });
 
       // Send to backend
@@ -760,7 +771,7 @@ function VoiceAssistant({ visible, onClose }) {
 
       const fileUri = FileSystem.cacheDirectory + 'sentralis_reply.mp3';
       await FileSystem.writeAsStringAsync(fileUri, base64mp3, {
-        encoding: FileSystem.EncodingType.Base64,
+        encoding: 'base64',
       });
 
       const { sound } = await Audio.Sound.createAsync({ uri: fileUri });
@@ -954,7 +965,7 @@ function CommandScreen() {
   // ── Derived intelligence values ─────────────────────────────────────────────
   const hour     = new Date().getHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
-  const dateStr  = new Date().toLocaleDateString('en-PH', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  const dateStr  = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
 
   const pendingTasks  = tasks.filter(t => t.status === 'pending' || t.status === 'in-progress');
   const overdueTasks  = tasks.filter(t => SheetsService.isOverdue(t.dueDate) && t.status !== 'completed' && t.status !== 'done');
@@ -1094,7 +1105,7 @@ function CommandScreen() {
                       <View style={{ flexDirection: 'row', gap: 8, marginTop: 2 }}>
                         <Text style={[s.dashTaskMeta, { color: CONTEXT_COLORS[task.context] || C.accent }]}>{task.context}</Text>
                         {isOverdue && <Text style={[s.dashTaskMeta, { color: C.critical }]}>⚠ OVERDUE</Text>}
-                        {task.dueDate && !isOverdue && <Text style={s.dashTaskMeta}>Due {task.dueDate}</Text>}
+                        {task.dueDate && !isOverdue && <Text style={s.dashTaskMeta}>Due {formatDate(task.dueDate)}</Text>}
                       </View>
                     </View>
                     <View style={[{ width: 6, alignSelf: 'stretch', borderRadius: 4, backgroundColor: cfg.color + '55' }]} />
@@ -1569,7 +1580,7 @@ function MoneyScreen() {
                     </View>
                     <Text style={{ fontSize: 13, fontWeight: '600', color: C.text }}>{rec.description || rec.type}</Text>
                     <View style={{ flexDirection: 'row', gap: 12 }}>
-                      {rec.date ? <Text style={{ fontSize: 10, color: C.textDim }}>📅 {rec.date}</Text> : null}
+                      {rec.date ? <Text style={{ fontSize: 10, color: C.textDim }}>📅 {formatDate(rec.date)}</Text> : null}
                       {rec.account ? <Text style={{ fontSize: 10, color: C.textDim }}>🏦 {rec.account}</Text> : null}
                     </View>
                   </View>
@@ -1653,7 +1664,7 @@ function TimeScreen() {
     const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
     const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     const isToday = dateStr === today;
-    return `${isToday ? 'TODAY · ' : ''}${days[d.getDay()]}, ${months[d.getMonth()]} ${d.getDate()}`;
+    return `${isToday ? 'TODAY · ' : ''}${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
   };
 
   const VIEWS = ['TODAY', 'WEEK', 'ALL'];
@@ -1858,6 +1869,279 @@ function StableInput({ onChangeText, placeholder, keyboardType, multiline, defau
   );
 }
 
+// ─── DRUM ROLL — smooth finger drag, tap center to type ───────────────────────
+function DrumRoll({ items, selectedIndex, onSelect, itemHeight = 44, visibleCount = 5 }) {
+  const paddingItems = Math.floor(visibleCount / 2);
+  const containerHeight = itemHeight * visibleCount;
+
+  // Animated offset — moves the list as finger drags
+  const offset      = useRef(new Animated.Value(-selectedIndex * itemHeight)).current;
+  const lastOffset  = useRef(-selectedIndex * itemHeight);
+  const startY      = useRef(0);
+  const isDragging  = useRef(false);
+
+  const [editing, setEditing]   = useState(false);
+  const [typeVal, setTypeVal]   = useState('');
+  const inputRef                = useRef(null);
+
+  // Sync when selectedIndex changes from outside
+  useEffect(() => {
+    const target = -selectedIndex * itemHeight;
+    lastOffset.current = target;
+    offset.setValue(target);
+  }, [selectedIndex]);
+
+  const clamp = (val) => Math.max(-(items.length - 1) * itemHeight, Math.min(0, val));
+
+  const snapToIndex = (rawOffset) => {
+    const idx = Math.max(0, Math.min(items.length - 1, Math.round(-rawOffset / itemHeight)));
+    const snapped = -idx * itemHeight;
+    lastOffset.current = snapped;
+    Animated.spring(offset, {
+      toValue: snapped,
+      useNativeDriver: true,
+      tension: 120,
+      friction: 10,
+    }).start();
+    onSelect(idx);
+  };
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 2,
+      onPanResponderGrant: (e) => {
+        isDragging.current = false;
+        startY.current = e.nativeEvent.pageY;
+        offset.stopAnimation((v) => { lastOffset.current = v; });
+      },
+      onPanResponderMove: (e) => {
+        const dy = e.nativeEvent.pageY - startY.current;
+        if (Math.abs(dy) > 4) isDragging.current = true;
+        offset.setValue(clamp(lastOffset.current + dy));
+      },
+      onPanResponderRelease: (e) => {
+        const dy = e.nativeEvent.pageY - startY.current;
+        if (!isDragging.current) {
+          // It was a tap — find which item was tapped
+          const tapY    = e.nativeEvent.locationY;
+          const tappedIdx = Math.floor(tapY / itemHeight);
+          const realIdx   = tappedIdx - paddingItems;
+          const currentIdx = Math.round(-lastOffset.current / itemHeight);
+          if (realIdx === currentIdx) {
+            // Tapped the center selected item → open keyboard
+            setTypeVal(items[currentIdx] || '');
+            setEditing(true);
+            setTimeout(() => inputRef.current?.focus(), 50);
+          } else if (realIdx >= 0 && realIdx < items.length) {
+            // Tapped a non-center item → scroll to it
+            snapToIndex(-realIdx * itemHeight);
+          }
+        } else {
+          snapToIndex(clamp(lastOffset.current + dy));
+        }
+      },
+      onPanResponderTerminate: (e, g) => {
+        snapToIndex(clamp(lastOffset.current + g.dy));
+      },
+    })
+  ).current;
+
+  const handleTypeSubmit = () => {
+    const val = typeVal.trim();
+    const idx = items.indexOf(val);
+    if (idx >= 0) {
+      snapToIndex(-idx * itemHeight);
+    }
+    setEditing(false);
+  };
+
+  // Build the list of all items (with padding top/bottom so selection stays centered)
+  const allItems = [
+    ...Array(paddingItems).fill(''),
+    ...items,
+    ...Array(paddingItems).fill(''),
+  ];
+
+  return (
+    <View style={{ height: containerHeight, overflow: 'hidden' }}>
+      {/* Center highlight band */}
+      <View pointerEvents="none" style={{
+        position: 'absolute',
+        top: itemHeight * paddingItems,
+        left: 0, right: 0,
+        height: itemHeight,
+        backgroundColor: C.accent + '20',
+        borderTopWidth: 1,
+        borderBottomWidth: 1,
+        borderColor: C.accent + '55',
+        zIndex: 2,
+      }} />
+
+      {/* Keyboard input overlay — shown when center is tapped */}
+      {editing && (
+        <View style={{
+          position: 'absolute',
+          top: itemHeight * paddingItems,
+          left: 0, right: 0,
+          height: itemHeight,
+          zIndex: 10,
+          backgroundColor: C.bgCard,
+          borderTopWidth: 1,
+          borderBottomWidth: 1,
+          borderColor: C.accent,
+          justifyContent: 'center',
+          alignItems: 'center',
+        }}>
+          <TextInput
+            ref={inputRef}
+            value={typeVal}
+            onChangeText={setTypeVal}
+            onSubmitEditing={handleTypeSubmit}
+            onBlur={handleTypeSubmit}
+            returnKeyType="done"
+            selectTextOnFocus
+            style={{
+              width: '100%',
+              textAlign: 'center',
+              fontSize: 20,
+              fontWeight: '800',
+              color: C.accent,
+              paddingHorizontal: 4,
+            }}
+          />
+        </View>
+      )}
+
+      {/* Draggable list */}
+      <Animated.View
+        {...panResponder.panHandlers}
+        style={{ transform: [{ translateY: offset }] }}
+      >
+        {allItems.map((item, i) => {
+          const realIdx  = i - paddingItems;
+          const isSelected = realIdx === selectedIndex;
+          return (
+            <View
+              key={i}
+              style={{ height: itemHeight, alignItems: 'center', justifyContent: 'center' }}
+            >
+              <Text style={{
+                fontSize:   isSelected ? 20 : 14,
+                fontWeight: isSelected ? '800' : '400',
+                color:      isSelected ? C.text : C.textDim,
+              }}>
+                {item}
+              </Text>
+            </View>
+          );
+        })}
+      </Animated.View>
+    </View>
+  );
+}
+
+// ─── DATE INPUT — drum roll picker, no buttons ─────────────────────────────────
+function DateInput({ valueRef }) {
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const DAYS   = Array.from({ length: 31 }, (_, i) => String(i + 1).padStart(2, '0'));
+  const currentYear = new Date().getFullYear();
+  const YEARS  = Array.from({ length: 5 }, (_, i) => String(currentYear + i - 1));
+
+  const parseISO = (s) => {
+    const d = new Date((s || SheetsService.getTodayString()) + 'T00:00:00');
+    return isNaN(d) ? new Date() : d;
+  };
+  const init = parseISO(valueRef.current);
+  const [dayIdx,   setDayIdx]   = useState(init.getDate() - 1);
+  const [monthIdx, setMonthIdx] = useState(init.getMonth());
+  const [yearIdx,  setYearIdx]  = useState(Math.max(0, init.getFullYear() - (currentYear - 1)));
+
+  const commit = (d, mo, y) => {
+    const iso = `${YEARS[Math.min(y, YEARS.length-1)]}-${String(mo+1).padStart(2,'0')}-${String(d+1).padStart(2,'0')}`;
+    valueRef.current = iso;
+  };
+
+  const handleDay   = (i) => { setDayIdx(i);   commit(i, monthIdx, yearIdx); };
+  const handleMonth = (i) => { setMonthIdx(i); commit(dayIdx, i, yearIdx); };
+  const handleYear  = (i) => { setYearIdx(i);  commit(dayIdx, monthIdx, i); };
+
+  const label = `${DAYS[dayIdx]} ${MONTHS[monthIdx]} ${YEARS[Math.min(yearIdx, YEARS.length-1)]}`;
+
+  return (
+    <View style={{ backgroundColor: C.bgCardAlt, borderWidth: 1, borderColor: C.border, borderRadius: 12, overflow: 'hidden' }}>
+      <View style={{ paddingVertical: 6, alignItems: 'center', borderBottomWidth: 1, borderBottomColor: C.border }}>
+        <Text style={{ fontSize: 12, fontWeight: '700', color: C.accent, letterSpacing: 0.5 }}>{label}</Text>
+      </View>
+      <View style={{ flexDirection: 'row' }}>
+        <View style={{ flex: 1, borderRightWidth: 1, borderRightColor: C.border }}>
+          <Text style={{ fontSize: 9, fontWeight: '700', color: C.textDim, textAlign: 'center', paddingTop: 4, letterSpacing: 1 }}>DAY</Text>
+          <DrumRoll items={DAYS}   selectedIndex={dayIdx}   onSelect={handleDay}   itemHeight={40} visibleCount={5} />
+        </View>
+        <View style={{ flex: 1.3, borderRightWidth: 1, borderRightColor: C.border }}>
+          <Text style={{ fontSize: 9, fontWeight: '700', color: C.textDim, textAlign: 'center', paddingTop: 4, letterSpacing: 1 }}>MONTH</Text>
+          <DrumRoll items={MONTHS} selectedIndex={monthIdx} onSelect={handleMonth} itemHeight={40} visibleCount={5} />
+        </View>
+        <View style={{ flex: 1.2 }}>
+          <Text style={{ fontSize: 9, fontWeight: '700', color: C.textDim, textAlign: 'center', paddingTop: 4, letterSpacing: 1 }}>YEAR</Text>
+          <DrumRoll items={YEARS}  selectedIndex={yearIdx}  onSelect={handleYear}  itemHeight={40} visibleCount={5} />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+// ─── TIME INPUT — drum roll picker, no buttons ─────────────────────────────────
+function TimeInput({ valueRef }) {
+  const HOURS   = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, '0'));
+  const MINUTES = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0'));
+  const AMPMS   = ['AM', 'PM'];
+
+  const parse = (s) => {
+    const [h, m] = (s || '09:00').split(':').map(Number);
+    return { h: isNaN(h) ? 9 : h, m: isNaN(m) ? 0 : m };
+  };
+  const init    = parse(valueRef.current);
+  const initH12 = init.h % 12 || 12;
+  const [hourIdx,   setHourIdx]   = useState(initH12 - 1);
+  const [minuteIdx, setMinuteIdx] = useState(init.m);
+  const [ampmIdx,   setAmpmIdx]   = useState(init.h >= 12 ? 1 : 0);
+
+  const commit = (hi, mi, ai) => {
+    let h24 = (hi + 1) % 12;
+    if (ai === 1) h24 += 12;
+    valueRef.current = `${String(h24).padStart(2,'0')}:${String(mi).padStart(2,'0')}`;
+  };
+
+  const handleHour   = (i) => { setHourIdx(i);   commit(i, minuteIdx, ampmIdx); };
+  const handleMinute = (i) => { setMinuteIdx(i); commit(hourIdx, i, ampmIdx); };
+  const handleAMPM   = (i) => { setAmpmIdx(i);   commit(hourIdx, minuteIdx, i); };
+
+  const label = `${HOURS[hourIdx]}:${MINUTES[minuteIdx]} ${AMPMS[ampmIdx]}`;
+
+  return (
+    <View style={{ backgroundColor: C.bgCardAlt, borderWidth: 1, borderColor: C.border, borderRadius: 12, overflow: 'hidden' }}>
+      <View style={{ paddingVertical: 6, alignItems: 'center', borderBottomWidth: 1, borderBottomColor: C.border }}>
+        <Text style={{ fontSize: 12, fontWeight: '700', color: C.accent, letterSpacing: 0.5 }}>{label}</Text>
+      </View>
+      <View style={{ flexDirection: 'row' }}>
+        <View style={{ flex: 1, borderRightWidth: 1, borderRightColor: C.border }}>
+          <Text style={{ fontSize: 9, fontWeight: '700', color: C.textDim, textAlign: 'center', paddingTop: 4, letterSpacing: 1 }}>HOUR</Text>
+          <DrumRoll items={HOURS}   selectedIndex={hourIdx}   onSelect={handleHour}   itemHeight={40} visibleCount={5} />
+        </View>
+        <View style={{ flex: 1, borderRightWidth: 1, borderRightColor: C.border }}>
+          <Text style={{ fontSize: 9, fontWeight: '700', color: C.textDim, textAlign: 'center', paddingTop: 4, letterSpacing: 1 }}>MIN</Text>
+          <DrumRoll items={MINUTES} selectedIndex={minuteIdx} onSelect={handleMinute} itemHeight={40} visibleCount={5} />
+        </View>
+        <View style={{ flex: 0.8 }}>
+          <Text style={{ fontSize: 9, fontWeight: '700', color: C.textDim, textAlign: 'center', paddingTop: 4, letterSpacing: 1 }}>AM/PM</Text>
+          <DrumRoll items={AMPMS}   selectedIndex={ampmIdx}   onSelect={handleAMPM}   itemHeight={40} visibleCount={5} />
+        </View>
+      </View>
+    </View>
+  );
+}
+
 // ─── MORE SCREEN ──────────────────────────────────────────────────────────────
 function MoreScreen() {
   const [section, setSection] = useState(null); // null | 'addTask' | 'addEvent' | 'addMoney'
@@ -2042,7 +2326,7 @@ function MoreScreen() {
             <View style={{ marginTop: 16, backgroundColor: C.bgCard, borderWidth: 1, borderColor: C.border, borderRadius: 14, padding: 16, gap: 10 }}>
               <Text style={{ fontSize: 11, fontWeight: '800', color: C.textDim, letterSpacing: 1.5 }}>SYSTEM INFO</Text>
               {[
-                { label: 'App Version', value: 'v0.4 · Session 010' },
+                { label: 'App Version', value: 'v0.4 · Session 013' },
                 { label: 'Backend',     value: 'Railway · Online' },
                 { label: 'Data Source', value: 'Google Sheets' },
                 { label: 'Built by',    value: 'Rey & Claude · MCPro' },
@@ -2088,7 +2372,7 @@ function MoreScreen() {
             </Field>
 
             <Field label="DUE DATE">
-              <StableInput defaultValue={taskDueRef.current} onChangeText={v => taskDueRef.current = v} placeholder="YYYY-MM-DD" />
+              <DateInput valueRef={taskDueRef} />
             </Field>
 
             <TouchableOpacity onPress={saveTask} disabled={saving}
@@ -2119,12 +2403,12 @@ function MoreScreen() {
               </View>
             </Field>
 
-            <Field label="DATE (YYYY-MM-DD)">
-              <StableInput defaultValue={evtDateRef.current} onChangeText={v => evtDateRef.current = v} placeholder="2026-05-13" />
+            <Field label="DATE">
+              <DateInput valueRef={evtDateRef} />
             </Field>
 
-            <Field label="TIME (HH:MM)">
-              <StableInput defaultValue={evtTimeRef.current} onChangeText={v => evtTimeRef.current = v} placeholder="09:00" />
+            <Field label="TIME">
+              <TimeInput valueRef={evtTimeRef} />
             </Field>
 
             <Field label="LOCATION (OPTIONAL)">
@@ -2215,6 +2499,29 @@ function PlaceholderScreen({ label }) {
 export default function App() {
   const [activeTab, setActiveTab] = useState('command');
   const [taskCount, setTaskCount] = useState(0);
+
+  // ── Register device for push notifications ──────────────────────────────────
+  useEffect(() => {
+    (async () => {
+      if (!Device.isDevice) return;
+      const { status: existing } = await Notifications.getPermissionsAsync();
+      let finalStatus = existing;
+      if (existing !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+      if (finalStatus !== 'granted') return;
+      const tokenData = await Notifications.getExpoPushTokenAsync({
+        projectId: 'sentralis-8b176',
+      });
+      const token = tokenData.data;
+      await fetch(`${CONFIG.BACKEND_URL}/api/device/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, device: 'Samsung A34' }),
+      }).catch(() => {});
+    })();
+  }, []);
 
   useEffect(() => {
     if (!CONFIG.API_KEY) return;
