@@ -322,23 +322,30 @@ const OfflineQueue = {
           body = { title: data.title, context: item.context, content: data.description, priority: data.priority };
         }
         if (endpoint) {
-          const res = await fetch(`${CONFIG.BACKEND_URL}${endpoint}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          });
-          const result = await res.json();
-          if (result.success) {
-            await OfflineQueue.markSynced(item.id);
-            console.log(`[QUEUE] Synced item ${item.id} (${item.type})`);
-          } else {
-            // DEBUG — show exactly why sync failed
-            alert(`Sync failed (${item.type}): ${result.error || JSON.stringify(result)}`);
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 8000);
+          try {
+            const res = await fetch(`${CONFIG.BACKEND_URL}${endpoint}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+              signal: controller.signal,
+            });
+            clearTimeout(timeout);
+            const result = await res.json();
+            if (result.success) {
+              await OfflineQueue.markSynced(item.id);
+              console.log(`[QUEUE] Synced item ${item.id} (${item.type})`);
+            } else {
+              console.log(`[QUEUE] Sync rejected (${item.type}): ${result.error}`);
+            }
+          } catch (fetchErr) {
+            clearTimeout(timeout);
+            console.log(`[QUEUE] Fetch failed for item ${item.id}: ${fetchErr.message}`);
           }
         }
       } catch (e) {
-        alert(`Sync error (${item.type}): ${e.message}`);
-        console.log(`[QUEUE] Sync failed for item ${item.id} — ${e.message} — will retry`);
+        console.log(`[QUEUE] Sync error item ${item.id}: ${e.message}`);
       }
     }
   },
@@ -827,6 +834,15 @@ function VoiceAssistant({ visible, onClose }) {
     try {
       setErrorMsg('');
       Speech.stop();
+
+      // Force unload any existing recording before starting a new one
+      if (recordingRef.current) {
+        try {
+          await recordingRef.current.stopAndUnloadAsync();
+        } catch (e) {}
+        recordingRef.current = null;
+      }
+
       const { granted } = await Audio.requestPermissionsAsync();
       if (!granted) { setErrorMsg('Microphone permission needed.'); return; }
       await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
@@ -836,8 +852,9 @@ function VoiceAssistant({ visible, onClose }) {
       silenceTimerRef.current = setTimeout(() => { stopAndProcess(); }, 10000);
     } catch (e) {
       console.error('[VOICE] startListening error:', e);
-      setErrorMsg('Could not start recording.');
+      setErrorMsg('Could not start recording. Tap mic to retry.');
       setPhase('idle');
+      setSession(false);
     }
   };
 
@@ -885,8 +902,11 @@ function VoiceAssistant({ visible, onClose }) {
       // Show transcript immediately
       setTranscript(transcription);
 
-      // ── FAST PATH: Save to local SQLite immediately ───────────────────────────
-      await OfflineQueue.save(type, context, classified);
+      // ── FAST PATH: Save to local SQLite immediately (only valid types) ─────────
+      const validTypes = ['task', 'event', 'money', 'note'];
+      if (validTypes.includes(type)) {
+        await OfflineQueue.save(type, context, classified);
+      }
 
       // ── Build and speak confirmation instantly (device TTS — no internet) ─────
       let confirmText = '';
