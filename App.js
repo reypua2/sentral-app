@@ -331,9 +331,13 @@ const OfflineQueue = {
           if (result.success) {
             await OfflineQueue.markSynced(item.id);
             console.log(`[QUEUE] Synced item ${item.id} (${item.type})`);
+          } else {
+            // DEBUG — show exactly why sync failed
+            alert(`Sync failed (${item.type}): ${result.error || JSON.stringify(result)}`);
           }
         }
       } catch (e) {
+        alert(`Sync error (${item.type}): ${e.message}`);
         console.log(`[QUEUE] Sync failed for item ${item.id} — ${e.message} — will retry`);
       }
     }
