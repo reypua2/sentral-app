@@ -19,6 +19,8 @@ import {
 } from 'react-native';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as Speech from 'expo-speech';
+import * as SQLite from 'expo-sqlite';
 
 const { width } = Dimensions.get('window');
 
@@ -229,6 +231,112 @@ const SheetsService = {
     return rows.slice(1)
       .map(row => SheetsService.parseMoney(row, headers))
       .filter(m => m.id !== '');
+  },
+};
+
+// ─── OFFLINE QUEUE (SQLite) ───────────────────────────────────────────────────
+//
+// Saves voice logs locally first — syncs to backend when online.
+// Logging works instantly with zero internet dependency.
+//
+const OfflineQueue = {
+  db: null,
+
+  init: async () => {
+    try {
+      OfflineQueue.db = await SQLite.openDatabaseAsync('sentralis_queue.db');
+      await OfflineQueue.db.execAsync(`
+        CREATE TABLE IF NOT EXISTS queue (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          type TEXT NOT NULL,
+          context TEXT,
+          data TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          synced INTEGER DEFAULT 0
+        );
+      `);
+      console.log('[QUEUE] SQLite ready');
+    } catch (e) {
+      console.error('[QUEUE] Init error:', e.message);
+    }
+  },
+
+  save: async (type, context, data) => {
+    try {
+      if (!OfflineQueue.db) await OfflineQueue.init();
+      const now = new Date().toISOString();
+      await OfflineQueue.db.runAsync(
+        'INSERT INTO queue (type, context, data, created_at, synced) VALUES (?, ?, ?, ?, 0)',
+        [type, context, JSON.stringify(data), now]
+      );
+      console.log(`[QUEUE] Saved locally: ${type}`);
+      return true;
+    } catch (e) {
+      console.error('[QUEUE] Save error:', e.message);
+      return false;
+    }
+  },
+
+  getPending: async () => {
+    try {
+      if (!OfflineQueue.db) await OfflineQueue.init();
+      const rows = await OfflineQueue.db.getAllAsync(
+        'SELECT * FROM queue WHERE synced = 0 ORDER BY created_at ASC'
+      );
+      return rows;
+    } catch (e) {
+      console.error('[QUEUE] getPending error:', e.message);
+      return [];
+    }
+  },
+
+  markSynced: async (id) => {
+    try {
+      if (!OfflineQueue.db) await OfflineQueue.init();
+      await OfflineQueue.db.runAsync('UPDATE queue SET synced = 1 WHERE id = ?', [id]);
+    } catch (e) {
+      console.error('[QUEUE] markSynced error:', e.message);
+    }
+  },
+
+  syncAll: async () => {
+    const pending = await OfflineQueue.getPending();
+    if (pending.length === 0) return;
+    console.log(`[QUEUE] Syncing ${pending.length} pending item(s)...`);
+    for (const item of pending) {
+      try {
+        const data = JSON.parse(item.data);
+        let endpoint = '';
+        let body = {};
+        if (item.type === 'task') {
+          endpoint = '/api/tasks';
+          body = { title: data.title, context: item.context, priority: data.priority, dueDate: data.due_date, assignedTo: 'Rey', detail: data.description };
+        } else if (item.type === 'event') {
+          endpoint = '/api/events';
+          body = { title: data.title, context: item.context, date: data.date, time: data.time, location: data.location, priority: data.priority };
+        } else if (item.type === 'money') {
+          endpoint = '/api/money';
+          body = { type: data.type_money || 'expense', amount: data.amount, currency: 'PHP', context: item.context, category: data.category, description: data.description };
+        } else if (item.type === 'note') {
+          endpoint = '/api/notes';
+          body = { title: data.title, context: item.context, content: data.description, priority: data.priority };
+        }
+        if (endpoint) {
+          const res = await fetch(`${CONFIG.BACKEND_URL}${endpoint}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          const result = await res.json();
+          if (result.success) {
+            await OfflineQueue.markSynced(item.id);
+            console.log(`[QUEUE] Synced item ${item.id} (${item.type})`);
+          }
+        }
+      } catch (e) {
+        console.log(`[QUEUE] Sync failed for item ${item.id} — ${e.message} — will retry`);
+      }
+    }
   },
 };
 
@@ -621,20 +729,22 @@ function TasksScreen() {
 
 // ─── VOICE ASSISTANT ──────────────────────────────────────────────────────────
 //
-// Gemini-style voice flow:
-//   Tap mic → record → 10s silence auto-stops → backend processes →
-//   TTS reply plays → auto-listens again → tap mic to end session
+// New architecture (Session 015):
+//   Tap mic → record → send to backend → show transcript INSTANTLY
+//   → save to SQLite local queue immediately → speak confirmation via expo-speech
+//   → background sync to Google Sheets whenever online
+//   → no OpenAI TTS for logging (only for query replies)
 //
 function VoiceAssistant({ visible, onClose }) {
-  const [phase, setPhase]           = useState('idle');    // idle | listening | processing | speaking
+  const [phase, setPhase]           = useState('idle');    // idle | listening | processing | confirmed
   const [transcript, setTranscript] = useState('');
   const [replyText, setReplyText]   = useState('');
   const [sessionActive, setSession] = useState(false);
   const [history, setHistory]       = useState([]);
   const [errorMsg, setErrorMsg]     = useState('');
+  const [pendingCount, setPendingCount] = useState(0);
 
   const recordingRef    = useRef(null);
-  const soundRef        = useRef(null);
   const silenceTimerRef = useRef(null);
   const pulseAnim       = useRef(new Animated.Value(1)).current;
 
@@ -651,43 +761,75 @@ function VoiceAssistant({ visible, onClose }) {
     }
   }, [phase]);
 
+  // Init SQLite + background sync on open
+  useEffect(() => {
+    if (visible) {
+      OfflineQueue.init();
+      syncAndUpdateCount();
+      // Background sync every 30 seconds while voice panel is open
+      const syncInterval = setInterval(syncAndUpdateCount, 30000);
+      return () => clearInterval(syncInterval);
+    }
+  }, [visible]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       clearTimeout(silenceTimerRef.current);
       if (recordingRef.current) recordingRef.current.stopAndUnloadAsync().catch(() => {});
-      if (soundRef.current) soundRef.current.unloadAsync().catch(() => {});
+      Speech.stop();
     };
   }, []);
 
-  // ── Start a recording ────────────────────────────────────────────────────────
+  const syncAndUpdateCount = async () => {
+    await OfflineQueue.syncAll();
+    const pending = await OfflineQueue.getPending();
+    setPendingCount(pending.length);
+  };
+
+  // ── Speak confirmation using device TTS — no internet needed ─────────────────
+  const speakConfirmation = (text) => {
+    Speech.stop();
+    Speech.speak(text, {
+      language: 'en-PH',
+      pitch: 1.0,
+      rate: 1.1,
+    });
+  };
+
+  // ── Build instant confirmation from classified data ───────────────────────────
+  const buildConfirmation = (type, data, context) => {
+    const d = data || {};
+    switch (type) {
+      case 'task':
+        return `Task saved. ${d.title || 'Task'}, ${context} context.`;
+      case 'event':
+        return `Event saved. ${d.title || 'Event'}${d.time ? ', at ' + d.time : ''}.`;
+      case 'money':
+        const amt = d.amount ? `${Number(d.amount).toLocaleString()} pesos` : '';
+        const monType = d.type_money === 'income' ? 'income' : 'expense';
+        return `${monType} logged. ${amt}, ${context}.`;
+      case 'note':
+        return `Note saved. ${context} context.`;
+      case 'query':
+        return null; // queries get full AI reply
+      default:
+        return `Saved to ${context}.`;
+    }
+  };
+
+  // ── Start recording ───────────────────────────────────────────────────────────
   const startListening = async () => {
     try {
       setErrorMsg('');
-      // Request mic permission
+      Speech.stop();
       const { granted } = await Audio.requestPermissionsAsync();
-      if (!granted) {
-        setErrorMsg('Microphone permission needed.');
-        return;
-      }
-
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-      });
-
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
+      if (!granted) { setErrorMsg('Microphone permission needed.'); return; }
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
       recordingRef.current = recording;
       setPhase('listening');
-
-      // Auto-stop after 10 seconds of silence (we use a flat 10s timer here)
-      // Timer resets every time we restart listening after a reply
-      silenceTimerRef.current = setTimeout(() => {
-        stopAndProcess();
-      }, 10000);
-
+      silenceTimerRef.current = setTimeout(() => { stopAndProcess(); }, 10000);
     } catch (e) {
       console.error('[VOICE] startListening error:', e);
       setErrorMsg('Could not start recording.');
@@ -695,7 +837,7 @@ function VoiceAssistant({ visible, onClose }) {
     }
   };
 
-  // ── Stop recording and send to backend ──────────────────────────────────────
+  // ── Stop and process — new fast flow ─────────────────────────────────────────
   const stopAndProcess = async () => {
     clearTimeout(silenceTimerRef.current);
     if (!recordingRef.current) return;
@@ -706,113 +848,95 @@ function VoiceAssistant({ visible, onClose }) {
       const uri = recordingRef.current.getURI();
       recordingRef.current = null;
 
-      // Read audio file as base64
-      const base64Audio = await FileSystem.readAsStringAsync(uri, {
-        encoding: 'base64',
-      });
+      const base64Audio = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
 
-      // Send to backend
+      // Send to backend — backend now returns NO audio for logging types
       const response = await fetch(`${CONFIG.BACKEND_URL}/api/voice/process`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          audio_base64: base64Audio,
-          format: 'm4a',
-          history,
-        }),
+        body: JSON.stringify({ audio_base64: base64Audio, format: 'm4a', history }),
       });
 
       const data = await response.json();
-      setTranscript(data.transcription || '');
-      setReplyText(data.response_text || '');
+      const transcription = data.transcription || '';
+      const type = data.type || 'note';
+      const context = data.context || 'MCPro';
 
-      // Update conversation history for context
-      if (data.transcription) {
+      // Build classified with fallbacks so SQLite always has something to sync
+      const rawData = data.data || {};
+      const classified = {
+        title:       rawData.title       || transcription,
+        description: rawData.description || transcription,
+        priority:    rawData.priority    || 'normal',
+        due_date:    rawData.due_date    || new Date().toISOString().split('T')[0],
+        date:        rawData.date        || new Date().toISOString().split('T')[0],
+        time:        rawData.time        || '09:00',
+        location:    rawData.location    || '',
+        amount:      rawData.amount      || 0,
+        type_money:  rawData.type_money  || 'expense',
+        category:    rawData.category    || '',
+        assigned_to: rawData.assigned_to || 'Rey',
+      };
+
+      // Show transcript immediately
+      setTranscript(transcription);
+
+      // ── FAST PATH: Save to local SQLite immediately ───────────────────────────
+      await OfflineQueue.save(type, context, classified);
+
+      // ── Build and speak confirmation instantly (device TTS — no internet) ─────
+      let confirmText = '';
+      if (type === 'query' && data.response_text) {
+        // For questions — show AI reply text, no device TTS (AI reply is richer)
+        confirmText = data.response_text;
+        setReplyText(confirmText);
+      } else {
+        // For logging — instant device confirmation
+        confirmText = buildConfirmation(type, classified, context);
+        setReplyText(confirmText);
+        if (confirmText) speakConfirmation(confirmText);
+      }
+
+      // Update history
+      if (transcription) {
         setHistory(prev => [
           ...prev.slice(-8),
-          { role: 'user', content: data.transcription },
-          { role: 'assistant', content: data.response_text || '' },
+          { role: 'user', content: transcription },
+          { role: 'assistant', content: confirmText || '' },
         ]);
       }
 
-      // Play TTS reply
-      if (data.audio_base64) {
-        setPhase('speaking');
-        await playAudio(data.audio_base64);
-      }
+      setPhase('confirmed');
 
-      // Auto-listen again if session still active
+      // Trigger background sync
+      syncAndUpdateCount();
+
+      // Auto-listen again if session active
       if (sessionActive) {
-        await startListening();
-      } else {
-        setPhase('idle');
+        setTimeout(() => startListening(), 1500);
       }
 
     } catch (e) {
       console.error('[VOICE] stopAndProcess error:', e);
-      setErrorMsg('Error processing. Try again.');
+      setErrorMsg('Error processing. Tap mic to try again.');
       setPhase('idle');
+      setSession(false); // Stop auto-listen loop on error
     }
   };
 
-  // ── Play base64 MP3 audio ────────────────────────────────────────────────────
-  const playAudio = async (base64mp3) => {
-    try {
-      // Unload previous sound
-      if (soundRef.current) {
-        await soundRef.current.unloadAsync();
-        soundRef.current = null;
-      }
-
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-      });
-
-      const fileUri = FileSystem.cacheDirectory + 'sentralis_reply.mp3';
-      await FileSystem.writeAsStringAsync(fileUri, base64mp3, {
-        encoding: 'base64',
-      });
-
-      const { sound } = await Audio.Sound.createAsync({ uri: fileUri });
-      soundRef.current = sound;
-
-      await new Promise((resolve) => {
-        sound.setOnPlaybackStatusUpdate((status) => {
-          if (status.didJustFinish) resolve();
-        });
-        sound.playAsync();
-      });
-
-    } catch (e) {
-      console.error('[VOICE] playAudio error:', e);
-    }
-  };
-
-  // ── Main mic button handler ──────────────────────────────────────────────────
+  // ── Mic button handler ────────────────────────────────────────────────────────
   const handleMicPress = async () => {
-    if (phase === 'idle') {
-      // Start new session
+    if (phase === 'idle' || phase === 'confirmed') {
       setSession(true);
-      setHistory([]);
-      setTranscript('');
-      setReplyText('');
+      if (phase === 'idle') { setHistory([]); setTranscript(''); setReplyText(''); }
       await startListening();
     } else {
-      // End session manually
       clearTimeout(silenceTimerRef.current);
       setSession(false);
       if (recordingRef.current) {
-        try {
-          await recordingRef.current.stopAndUnloadAsync();
-          recordingRef.current = null;
-        } catch (e) {}
+        try { await recordingRef.current.stopAndUnloadAsync(); recordingRef.current = null; } catch (e) {}
       }
-      if (soundRef.current) {
-        try {
-          await soundRef.current.stopAsync();
-        } catch (e) {}
-      }
+      Speech.stop();
       setPhase('idle');
     }
   };
@@ -822,15 +946,15 @@ function VoiceAssistant({ visible, onClose }) {
   const phaseLabel = {
     idle:       'Tap mic to speak',
     listening:  'Listening... (tap to stop)',
-    processing: 'Processing...',
-    speaking:   'Speaking...',
+    processing: 'Transcribing...',
+    confirmed:  'Saved! Tap mic to log another.',
   }[phase];
 
   const phaseColor = {
     idle:       C.textDim,
     listening:  C.light,
     processing: C.accent,
-    speaking:   C.important,
+    confirmed:  C.light,
   }[phase];
 
   return (
@@ -844,6 +968,18 @@ function VoiceAssistant({ visible, onClose }) {
           </TouchableOpacity>
         </View>
 
+        {/* Sync status */}
+        {pendingCount > 0 && (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8, backgroundColor: C.importantBg, borderRadius: 8, padding: 8 }}>
+            <Text style={{ fontSize: 10, color: C.important }}>⏳ {pendingCount} item{pendingCount > 1 ? 's' : ''} queued — will sync when online</Text>
+          </View>
+        )}
+        {pendingCount === 0 && (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+            <View style={s.liveDot} /><Text style={s.liveText}>ALL SYNCED</Text>
+          </View>
+        )}
+
         {/* Status */}
         <Text style={[s.voiceStatus, { color: phaseColor }]}>{phaseLabel}</Text>
 
@@ -855,10 +991,12 @@ function VoiceAssistant({ visible, onClose }) {
           </View>
         ) : null}
 
-        {/* Reply */}
+        {/* Reply / Confirmation */}
         {replyText ? (
-          <View style={s.voiceReply}>
-            <Text style={s.voiceReplyLabel}>SENTRALIS</Text>
+          <View style={[s.voiceReply, phase === 'confirmed' && { borderColor: C.light + '44', backgroundColor: C.lightBg }]}>
+            <Text style={[s.voiceReplyLabel, phase === 'confirmed' && { color: C.light }]}>
+              {phase === 'confirmed' ? '✓ SAVED' : 'SENTRALIS'}
+            </Text>
             <Text style={s.voiceReplyText}>{replyText}</Text>
           </View>
         ) : null}
@@ -871,15 +1009,20 @@ function VoiceAssistant({ visible, onClose }) {
           <Animated.View style={[
             s.voiceMicRing,
             phase === 'listening' && { borderColor: C.light + '88' },
+            phase === 'confirmed' && { borderColor: C.light + '55' },
             { transform: [{ scale: pulseAnim }] }
           ]}>
             <TouchableOpacity
-              style={[s.voiceMicBtn, phase === 'listening' && { backgroundColor: C.critical }]}
+              style={[
+                s.voiceMicBtn,
+                phase === 'listening' && { backgroundColor: C.critical },
+                phase === 'confirmed' && { backgroundColor: C.light + 'CC' },
+              ]}
               onPress={handleMicPress}
               activeOpacity={0.8}
             >
               <Text style={s.voiceMicIcon}>
-                {phase === 'idle' ? '🎤' : phase === 'listening' ? '⏹' : phase === 'processing' ? '⏳' : '🔊'}
+                {phase === 'idle' ? '🎤' : phase === 'listening' ? '⏹' : phase === 'processing' ? '⏳' : '✓'}
               </Text>
             </TouchableOpacity>
           </Animated.View>
@@ -888,7 +1031,9 @@ function VoiceAssistant({ visible, onClose }) {
         {/* Hint */}
         <Text style={s.voiceHint}>
           {phase === 'listening'
-            ? 'Auto-stops after 10 seconds of silence'
+            ? 'Auto-stops after 10 seconds'
+            : phase === 'confirmed'
+            ? 'Tap mic to log another item'
             : phase === 'idle'
             ? 'Say a task, event, expense, or question'
             : ''}
@@ -2500,6 +2645,13 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('command');
   const [taskCount, setTaskCount] = useState(0);
 
+  // ── Init SQLite + background sync every 60 seconds ──────────────────────────
+  useEffect(() => {
+    OfflineQueue.init().then(() => OfflineQueue.syncAll());
+    const syncInterval = setInterval(() => OfflineQueue.syncAll(), 60000);
+    return () => clearInterval(syncInterval);
+  }, []);
+
   // ── Register device for push notifications ──────────────────────────────────
   useEffect(() => {
     (async () => {
@@ -2511,14 +2663,23 @@ export default function App() {
         finalStatus = status;
       }
       if (finalStatus !== 'granted') return;
-      const tokenData = await Notifications.getExpoPushTokenAsync({
-        projectId: 'sentralis-8b176',
-      });
-      const token = tokenData.data;
+      let token = null;
+      try {
+        const pushToken = await Notifications.getExpoPushTokenAsync({
+          projectId: '575623ad-e4fe-48aa-9250-9249d9466807',
+        });
+        token = pushToken.data;
+      } catch (err) {
+        // Push notifications not available — skip silently
+        // Fix in Session 016: update EAS CLI then run eas credentials FCM V1
+        console.log('[PUSH] Token error (will fix in S016):', err.message);
+        return;
+      }
+      if (!token) return;
       await fetch(`${CONFIG.BACKEND_URL}/api/device/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, device: 'Samsung A34' }),
+        body: JSON.stringify({ token, device: 'Samsung A34', tokenType: 'expo' }),
       }).catch(() => {});
     })();
   }, []);
