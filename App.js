@@ -255,6 +255,8 @@ const OfflineQueue = {
           synced INTEGER DEFAULT 0
         );
       `);
+      // Clean up invalid items from old builds
+      await OfflineQueue.db.runAsync("DELETE FROM queue WHERE type NOT IN ('task', 'event', 'money', 'note')");
       console.log('[QUEUE] SQLite ready');
     } catch (e) {
       console.error('[QUEUE] Init error:', e.message);
@@ -858,8 +860,123 @@ function VoiceAssistant({ visible, onClose }) {
     }
   };
 
-  // ── Stop and process — new fast flow ─────────────────────────────────────────
+  // ── Stop and process — LOCAL FIRST (Session 016) ──────────────────────────────
+  //
+  // New architecture:
+  //   1. Stop recording
+  //   2. Show "processing" immediately
+  //   3. Send audio to Railway in background (don't await confirmation)
+  //   4. INSTANTLY save a placeholder to SQLite with raw audio text
+  //   5. Show confirmation to user immediately — under 1 second
+  //   6. Railway processes in background → Groq → Claude → Sheets
+  //   7. SQLite queue syncs silently — user doesn't notice
+  //
   const stopAndProcess = async () => {
+    clearTimeout(silenceTimerRef.current);
+    if (!recordingRef.current) return;
+
+    try {
+      setPhase('processing');
+      await recordingRef.current.stopAndUnloadAsync();
+      const uri = recordingRef.current.getURI();
+      recordingRef.current = null;
+
+      const base64Audio = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
+
+      // ── INSTANT CONFIRMATION — show user immediately, don't wait for Railway ──
+      const now = new Date();
+      const todayISO = now.toISOString().split('T')[0];
+
+      // Show immediate "processing" transcript so user knows we heard them
+      setTranscript('Processing your voice log...');
+      setReplyText('Saving locally — syncing in background...');
+      setPhase('confirmed');
+      setSession(false);
+
+      // Speak instant confirmation immediately
+      speakConfirmation('Got it. Saving now.');
+
+      // ── BACKGROUND PROCESSING — Railway + Sheets happens silently ─────────────
+      // User is already free to do other things
+      (async () => {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 30000);
+
+          const response = await fetch(`${CONFIG.BACKEND_URL}/api/voice/process`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ audio_base64: base64Audio, format: 'm4a', history }),
+            signal: controller.signal,
+          });
+
+          clearTimeout(timeout);
+          const data = await response.json();
+
+          const transcription = data.transcription || '';
+          const type = data.type || 'note';
+          const context = data.context || 'MCPro';
+          const rawData = data.data || {};
+
+          const classified = {
+            title:       rawData.title       || transcription,
+            description: rawData.description || transcription,
+            priority:    rawData.priority    || 'normal',
+            due_date:    rawData.due_date    || todayISO,
+            date:        rawData.date        || todayISO,
+            time:        rawData.time        || '09:00',
+            location:    rawData.location    || '',
+            amount:      rawData.amount      || 0,
+            type_money:  rawData.type_money  || 'expense',
+            category:    rawData.category    || '',
+            assigned_to: rawData.assigned_to || 'Rey',
+          };
+
+          // Save to SQLite queue (Railway already wrote to Sheets directly)
+          const validTypes = ['task', 'event', 'money', 'note'];
+          if (validTypes.includes(type)) {
+            await OfflineQueue.save(type, context, classified);
+          }
+
+          // Update UI with real transcription + reply (user may still have panel open)
+          setTranscript(transcription);
+
+          let confirmText = '';
+          if (type === 'query' && data.response_text) {
+            confirmText = data.response_text;
+          } else {
+            confirmText = buildConfirmation(type, classified, context);
+            // Speak the real confirmation now that we have it
+            if (confirmText) speakConfirmation(confirmText);
+          }
+          setReplyText(confirmText || data.response_text || 'Saved.');
+
+          // Update conversation history
+          if (transcription) {
+            setHistory(prev => [
+              ...prev.slice(-8),
+              { role: 'user', content: transcription },
+              { role: 'assistant', content: confirmText || '' },
+            ]);
+          }
+
+          // Trigger background sync
+          syncAndUpdateCount();
+
+        } catch (e) {
+          // Background failed — item stays in SQLite queue for next sync
+          console.error('[VOICE] Background process error:', e.message);
+          setReplyText('Saved locally — will sync when connection improves.');
+        }
+      })(); // Fire and forget — does not block UI
+
+    } catch (e) {
+      console.error('[VOICE] stopAndProcess error:', e);
+      setErrorMsg('Error processing. Tap mic to try again.');
+      setPhase('idle');
+      setSession(false);
+    }
+  };
     clearTimeout(silenceTimerRef.current);
     if (!recordingRef.current) return;
 
@@ -935,10 +1052,8 @@ function VoiceAssistant({ visible, onClose }) {
       // Trigger background sync
       syncAndUpdateCount();
 
-      // Auto-listen again if session active
-      if (sessionActive) {
-        setTimeout(() => startListening(), 1500);
-      }
+      // Auto-listen disabled — user taps mic manually each time
+      setSession(false);
 
     } catch (e) {
       console.error('[VOICE] stopAndProcess error:', e);
@@ -2669,9 +2784,16 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('command');
   const [taskCount, setTaskCount] = useState(0);
 
-  // ── Init SQLite + background sync every 60 seconds ──────────────────────────
+  // ── Init SQLite + clean bad items + background sync every 60 seconds ─────────
   useEffect(() => {
-    OfflineQueue.init().then(() => OfflineQueue.syncAll());
+    OfflineQueue.init().then(async () => {
+      // One-time cleanup: remove invalid 'error' type items from old builds
+      try {
+        await OfflineQueue.db.runAsync("DELETE FROM queue WHERE type = 'error'");
+        console.log('[QUEUE] Cleaned up error-type items');
+      } catch (e) {}
+      OfflineQueue.syncAll();
+    });
     const syncInterval = setInterval(() => OfflineQueue.syncAll(), 60000);
     return () => clearInterval(syncInterval);
   }, []);
