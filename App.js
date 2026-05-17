@@ -742,53 +742,91 @@ function TasksScreen() {
 
 // ─── VOICE ASSISTANT ──────────────────────────────────────────────────────────
 //
-// New architecture (Session 015):
-//   Tap mic → record → send to backend → show transcript INSTANTLY
-//   → save to SQLite local queue immediately → speak confirmation via expo-speech
-//   → background sync to Google Sheets whenever online
-//   → no OpenAI TTS for logging (only for query replies)
+// Session 017 architecture — VAD + Barge-in:
+//   Tap mic → record → VAD monitors audio levels in real time
+//   → silence for 1.5s triggers auto-stop (no manual tap needed)
+//   → instant local-first confirmation while Railway processes in background
+//   → barge-in: tap mic while phone is speaking to interrupt and record again
+//   → SQLite offline queue syncs silently in background
 //
+// VAD implementation:
+//   expo-av getStatusAsync() returns metering (dBFS) when isMeteringEnabled=true
+//   We poll every 150ms. If metering < SILENCE_THRESHOLD for SILENCE_DURATION ms
+//   we consider the user done speaking and auto-trigger stopAndProcess().
+//   A minimum recording guard (MIN_RECORD_MS) prevents false triggers on mic pop.
+//
+const VAD_CONFIG = {
+  POLL_INTERVAL_MS:   150,   // how often we check audio level
+  SILENCE_THRESHOLD:  -40,   // dBFS below this = silence (typical speech is -20 to -10)
+  SILENCE_DURATION:   1500,  // ms of continuous silence before auto-stop
+  MIN_RECORD_MS:      600,   // min ms to record before VAD can trigger (prevents mic pop false-stop)
+};
+
 function VoiceAssistant({ visible, onClose }) {
   const [phase, setPhase]           = useState('idle');    // idle | listening | processing | confirmed
   const [transcript, setTranscript] = useState('');
   const [replyText, setReplyText]   = useState('');
-  const [sessionActive, setSession] = useState(false);
   const [history, setHistory]       = useState([]);
   const [errorMsg, setErrorMsg]     = useState('');
   const [pendingCount, setPendingCount] = useState(0);
+  const [audioLevel, setAudioLevel] = useState(0);        // 0-1 for waveform display
+  const [silenceCountdown, setSilenceCountdown] = useState(0); // 0-1 for silence indicator
 
-  const recordingRef    = useRef(null);
-  const silenceTimerRef = useRef(null);
-  const pulseAnim       = useRef(new Animated.Value(1)).current;
+  const recordingRef       = useRef(null);
+  const vadIntervalRef     = useRef(null);
+  const silenceSinceRef    = useRef(null);  // timestamp when silence started
+  const recordingStartRef  = useRef(null);  // timestamp when recording started
+  const pulseAnim          = useRef(new Animated.Value(1)).current;
+  const waveAnims          = useRef(
+    Array.from({ length: 5 }, () => new Animated.Value(0.15))
+  ).current;
 
-  // Pulse animation while listening
+  // ── Waveform animation while listening ───────────────────────────────────────
   useEffect(() => {
     if (phase === 'listening') {
+      // Each bar animates independently for a natural waveform look
+      waveAnims.forEach((anim, i) => {
+        Animated.loop(
+          Animated.sequence([
+            Animated.timing(anim, {
+              toValue: 0.2 + Math.random() * 0.8,
+              duration: 200 + i * 80,
+              useNativeDriver: true,
+            }),
+            Animated.timing(anim, {
+              toValue: 0.1 + Math.random() * 0.3,
+              duration: 200 + i * 60,
+              useNativeDriver: true,
+            }),
+          ])
+        ).start();
+      });
+      // Pulse the mic ring
       Animated.loop(Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 1.25, duration: 700, useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 1,    duration: 700, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1.15, duration: 900, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1,    duration: 900, useNativeDriver: true }),
       ])).start();
     } else {
+      waveAnims.forEach(a => { a.stopAnimation(); a.setValue(0.15); });
       pulseAnim.stopAnimation();
       pulseAnim.setValue(1);
     }
   }, [phase]);
 
-  // Init SQLite + background sync on open
+  // ── Init SQLite + background sync on open ────────────────────────────────────
   useEffect(() => {
     if (visible) {
       OfflineQueue.init();
       syncAndUpdateCount();
-      // Background sync every 30 seconds while voice panel is open
       const syncInterval = setInterval(syncAndUpdateCount, 30000);
       return () => clearInterval(syncInterval);
     }
   }, [visible]);
 
-  // Cleanup on unmount
+  // ── Cleanup on unmount ───────────────────────────────────────────────────────
   useEffect(() => {
     return () => {
-      clearTimeout(silenceTimerRef.current);
+      stopVAD();
       if (recordingRef.current) recordingRef.current.stopAndUnloadAsync().catch(() => {});
       Speech.stop();
     };
@@ -800,17 +838,71 @@ function VoiceAssistant({ visible, onClose }) {
     setPendingCount(pending.length);
   };
 
-  // ── Speak confirmation using device TTS — no internet needed ─────────────────
-  const speakConfirmation = (text) => {
-    Speech.stop();
-    Speech.speak(text, {
-      language: 'en-PH',
-      pitch: 1.0,
-      rate: 1.1,
-    });
+  // ── VAD — start polling audio levels ─────────────────────────────────────────
+  const startVAD = () => {
+    silenceSinceRef.current = null;
+    setSilenceCountdown(0);
+
+    vadIntervalRef.current = setInterval(async () => {
+      if (!recordingRef.current) return;
+      try {
+        const status = await recordingRef.current.getStatusAsync();
+        if (!status.isRecording) return;
+
+        const db = status.metering ?? -160; // dBFS, 0 = max, -160 = silence
+        // Normalize to 0-1 for display (typical speech range -50 to -5 dBFS)
+        const normalized = Math.max(0, Math.min(1, (db + 60) / 55));
+        setAudioLevel(normalized);
+
+        const now = Date.now();
+        const recordedMs = now - (recordingStartRef.current || now);
+
+        // Only apply VAD after minimum recording guard
+        if (recordedMs < VAD_CONFIG.MIN_RECORD_MS) return;
+
+        if (db < VAD_CONFIG.SILENCE_THRESHOLD) {
+          // Silence detected
+          if (!silenceSinceRef.current) {
+            silenceSinceRef.current = now;
+          }
+          const silenceMs = now - silenceSinceRef.current;
+          const progress = Math.min(1, silenceMs / VAD_CONFIG.SILENCE_DURATION);
+          setSilenceCountdown(progress);
+
+          if (silenceMs >= VAD_CONFIG.SILENCE_DURATION) {
+            // Silence held long enough — auto-stop
+            console.log('[VAD] Silence threshold reached — auto-stopping');
+            stopVAD();
+            stopAndProcess();
+          }
+        } else {
+          // Sound detected — reset silence timer
+          silenceSinceRef.current = null;
+          setSilenceCountdown(0);
+        }
+      } catch (e) {
+        // Recording may have stopped externally — ignore
+      }
+    }, VAD_CONFIG.POLL_INTERVAL_MS);
   };
 
-  // ── Build instant confirmation from classified data ───────────────────────────
+  const stopVAD = () => {
+    if (vadIntervalRef.current) {
+      clearInterval(vadIntervalRef.current);
+      vadIntervalRef.current = null;
+    }
+    silenceSinceRef.current = null;
+    setSilenceCountdown(0);
+    setAudioLevel(0);
+  };
+
+  // ── Speak confirmation — device TTS, no internet needed ──────────────────────
+  const speakConfirmation = (text) => {
+    Speech.stop();
+    Speech.speak(text, { language: 'en-PH', pitch: 1.0, rate: 1.1 });
+  };
+
+  // ── Build instant confirmation text from classified data ─────────────────────
   const buildConfirmation = (type, data, context) => {
     const d = data || {};
     switch (type) {
@@ -825,54 +917,57 @@ function VoiceAssistant({ visible, onClose }) {
       case 'note':
         return `Note saved. ${context} context.`;
       case 'query':
-        return null; // queries get full AI reply
+        return null;
       default:
         return `Saved to ${context}.`;
     }
   };
 
-  // ── Start recording ───────────────────────────────────────────────────────────
+  // ── Start recording + VAD ─────────────────────────────────────────────────────
   const startListening = async () => {
     try {
       setErrorMsg('');
+
+      // ── BARGE-IN: if phone is speaking, stop it immediately ──────────────────
       Speech.stop();
 
-      // Force unload any existing recording before starting a new one
+      // Force unload any existing recording
       if (recordingRef.current) {
-        try {
-          await recordingRef.current.stopAndUnloadAsync();
-        } catch (e) {}
+        stopVAD();
+        try { await recordingRef.current.stopAndUnloadAsync(); } catch (e) {}
         recordingRef.current = null;
       }
 
       const { granted } = await Audio.requestPermissionsAsync();
       if (!granted) { setErrorMsg('Microphone permission needed.'); return; }
+
       await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-      const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+
+      // Enable metering so VAD can read audio levels
+      const { recording } = await Audio.Recording.createAsync({
+        ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
+        isMeteringEnabled: true,
+      });
+
       recordingRef.current = recording;
+      recordingStartRef.current = Date.now();
       setPhase('listening');
-      silenceTimerRef.current = setTimeout(() => { stopAndProcess(); }, 10000);
+      setTranscript('');
+      setReplyText('');
+
+      // Start VAD polling
+      startVAD();
+
     } catch (e) {
       console.error('[VOICE] startListening error:', e);
       setErrorMsg('Could not start recording. Tap mic to retry.');
       setPhase('idle');
-      setSession(false);
     }
   };
 
-  // ── Stop and process — LOCAL FIRST (Session 016) ──────────────────────────────
-  //
-  // New architecture:
-  //   1. Stop recording
-  //   2. Show "processing" immediately
-  //   3. Send audio to Railway in background (don't await confirmation)
-  //   4. INSTANTLY save a placeholder to SQLite with raw audio text
-  //   5. Show confirmation to user immediately — under 1 second
-  //   6. Railway processes in background → Groq → Claude → Sheets
-  //   7. SQLite queue syncs silently — user doesn't notice
-  //
+  // ── Stop recording + send — LOCAL FIRST ──────────────────────────────────────
   const stopAndProcess = async () => {
-    clearTimeout(silenceTimerRef.current);
+    stopVAD();
     if (!recordingRef.current) return;
 
     try {
@@ -882,22 +977,15 @@ function VoiceAssistant({ visible, onClose }) {
       recordingRef.current = null;
 
       const base64Audio = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
+      const todayISO = new Date().toISOString().split('T')[0];
 
-      // ── INSTANT CONFIRMATION — show user immediately, don't wait for Railway ──
-      const now = new Date();
-      const todayISO = now.toISOString().split('T')[0];
-
-      // Show immediate "processing" transcript so user knows we heard them
+      // ── INSTANT CONFIRMATION — user sees result immediately ───────────────────
       setTranscript('Processing your voice log...');
       setReplyText('Saving locally — syncing in background...');
       setPhase('confirmed');
-      setSession(false);
-
-      // Speak instant confirmation immediately
       speakConfirmation('Got it. Saving now.');
 
-      // ── BACKGROUND PROCESSING — Railway + Sheets happens silently ─────────────
-      // User is already free to do other things
+      // ── BACKGROUND: Railway → Groq → Claude → Sheets ─────────────────────────
       (async () => {
         try {
           const controller = new AbortController();
@@ -914,9 +1002,9 @@ function VoiceAssistant({ visible, onClose }) {
           const data = await response.json();
 
           const transcription = data.transcription || '';
-          const type = data.type || 'note';
-          const context = data.context || 'MCPro';
-          const rawData = data.data || {};
+          const type          = data.type           || 'note';
+          const context       = data.context        || 'MCPro';
+          const rawData       = data.data           || {};
 
           const classified = {
             title:       rawData.title       || transcription,
@@ -932,13 +1020,11 @@ function VoiceAssistant({ visible, onClose }) {
             assigned_to: rawData.assigned_to || 'Rey',
           };
 
-          // Save to SQLite queue (Railway already wrote to Sheets directly)
           const validTypes = ['task', 'event', 'money', 'note'];
           if (validTypes.includes(type)) {
             await OfflineQueue.save(type, context, classified);
           }
 
-          // Update UI with real transcription + reply (user may still have panel open)
           setTranscript(transcription);
 
           let confirmText = '';
@@ -946,137 +1032,47 @@ function VoiceAssistant({ visible, onClose }) {
             confirmText = data.response_text;
           } else {
             confirmText = buildConfirmation(type, classified, context);
-            // Speak the real confirmation now that we have it
             if (confirmText) speakConfirmation(confirmText);
           }
           setReplyText(confirmText || data.response_text || 'Saved.');
 
-          // Update conversation history
           if (transcription) {
             setHistory(prev => [
               ...prev.slice(-8),
-              { role: 'user', content: transcription },
+              { role: 'user',      content: transcription },
               { role: 'assistant', content: confirmText || '' },
             ]);
           }
 
-          // Trigger background sync
           syncAndUpdateCount();
 
         } catch (e) {
-          // Background failed — item stays in SQLite queue for next sync
           console.error('[VOICE] Background process error:', e.message);
           setReplyText('Saved locally — will sync when connection improves.');
         }
-      })(); // Fire and forget — does not block UI
+      })();
 
     } catch (e) {
       console.error('[VOICE] stopAndProcess error:', e);
       setErrorMsg('Error processing. Tap mic to try again.');
       setPhase('idle');
-      setSession(false);
-    }
-  };
-    clearTimeout(silenceTimerRef.current);
-    if (!recordingRef.current) return;
-
-    try {
-      setPhase('processing');
-      await recordingRef.current.stopAndUnloadAsync();
-      const uri = recordingRef.current.getURI();
-      recordingRef.current = null;
-
-      const base64Audio = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
-
-      // Send to backend — backend now returns NO audio for logging types
-      const response = await fetch(`${CONFIG.BACKEND_URL}/api/voice/process`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ audio_base64: base64Audio, format: 'm4a', history }),
-      });
-
-      const data = await response.json();
-      const transcription = data.transcription || '';
-      const type = data.type || 'note';
-      const context = data.context || 'MCPro';
-
-      // Build classified with fallbacks so SQLite always has something to sync
-      const rawData = data.data || {};
-      const classified = {
-        title:       rawData.title       || transcription,
-        description: rawData.description || transcription,
-        priority:    rawData.priority    || 'normal',
-        due_date:    rawData.due_date    || new Date().toISOString().split('T')[0],
-        date:        rawData.date        || new Date().toISOString().split('T')[0],
-        time:        rawData.time        || '09:00',
-        location:    rawData.location    || '',
-        amount:      rawData.amount      || 0,
-        type_money:  rawData.type_money  || 'expense',
-        category:    rawData.category    || '',
-        assigned_to: rawData.assigned_to || 'Rey',
-      };
-
-      // Show transcript immediately
-      setTranscript(transcription);
-
-      // ── FAST PATH: Save to local SQLite immediately (only valid types) ─────────
-      const validTypes = ['task', 'event', 'money', 'note'];
-      if (validTypes.includes(type)) {
-        await OfflineQueue.save(type, context, classified);
-      }
-
-      // ── Build and speak confirmation instantly (device TTS — no internet) ─────
-      let confirmText = '';
-      if (type === 'query' && data.response_text) {
-        // For questions — show AI reply text, no device TTS (AI reply is richer)
-        confirmText = data.response_text;
-        setReplyText(confirmText);
-      } else {
-        // For logging — instant device confirmation
-        confirmText = buildConfirmation(type, classified, context);
-        setReplyText(confirmText);
-        if (confirmText) speakConfirmation(confirmText);
-      }
-
-      // Update history
-      if (transcription) {
-        setHistory(prev => [
-          ...prev.slice(-8),
-          { role: 'user', content: transcription },
-          { role: 'assistant', content: confirmText || '' },
-        ]);
-      }
-
-      setPhase('confirmed');
-
-      // Trigger background sync
-      syncAndUpdateCount();
-
-      // Auto-listen disabled — user taps mic manually each time
-      setSession(false);
-
-    } catch (e) {
-      console.error('[VOICE] stopAndProcess error:', e);
-      setErrorMsg('Error processing. Tap mic to try again.');
-      setPhase('idle');
-      setSession(false); // Stop auto-listen loop on error
     }
   };
 
-  // ── Mic button handler ────────────────────────────────────────────────────────
+  // ── Mic button — tap to start, tap again to cancel (barge-in on confirmed) ───
   const handleMicPress = async () => {
-    if (phase === 'idle' || phase === 'confirmed') {
-      setSession(true);
-      if (phase === 'idle') { setHistory([]); setTranscript(''); setReplyText(''); }
-      await startListening();
-    } else {
-      clearTimeout(silenceTimerRef.current);
-      setSession(false);
+    if (phase === 'listening') {
+      // Manual stop
+      stopVAD();
       if (recordingRef.current) {
         try { await recordingRef.current.stopAndUnloadAsync(); recordingRef.current = null; } catch (e) {}
       }
       Speech.stop();
       setPhase('idle');
+    } else {
+      // Start — works from idle OR confirmed (barge-in after reply)
+      if (phase === 'idle') { setHistory([]); }
+      await startListening();
     }
   };
 
@@ -1084,7 +1080,7 @@ function VoiceAssistant({ visible, onClose }) {
 
   const phaseLabel = {
     idle:       'Tap mic to speak',
-    listening:  'Listening... (tap to stop)',
+    listening:  'Listening — will stop when you pause',
     processing: 'Transcribing...',
     confirmed:  'Saved! Tap mic to log another.',
   }[phase];
@@ -1096,9 +1092,13 @@ function VoiceAssistant({ visible, onClose }) {
     confirmed:  C.light,
   }[phase];
 
+  // Silence bar — grows as silence threshold approaches
+  const silenceBarWidth = `${Math.round(silenceCountdown * 100)}%`;
+
   return (
     <View style={s.voiceOverlay}>
       <View style={s.voiceCard}>
+
         {/* Header */}
         <View style={s.voiceHeader}>
           <Text style={s.voiceTitle}>◈ SENTRALIS VOICE</Text>
@@ -1108,12 +1108,11 @@ function VoiceAssistant({ visible, onClose }) {
         </View>
 
         {/* Sync status */}
-        {pendingCount > 0 && (
+        {pendingCount > 0 ? (
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8, backgroundColor: C.importantBg, borderRadius: 8, padding: 8 }}>
             <Text style={{ fontSize: 10, color: C.important }}>⏳ {pendingCount} item{pendingCount > 1 ? 's' : ''} queued — will sync when online</Text>
           </View>
-        )}
-        {pendingCount === 0 && (
+        ) : (
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 }}>
             <View style={s.liveDot} /><Text style={s.liveText}>ALL SYNCED</Text>
           </View>
@@ -1121,6 +1120,45 @@ function VoiceAssistant({ visible, onClose }) {
 
         {/* Status */}
         <Text style={[s.voiceStatus, { color: phaseColor }]}>{phaseLabel}</Text>
+
+        {/* ── WAVEFORM — visible while listening ── */}
+        {phase === 'listening' && (
+          <View style={{ alignItems: 'center', marginBottom: 12 }}>
+            {/* Audio level bars */}
+            <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 5, height: 40, marginBottom: 8 }}>
+              {waveAnims.map((anim, i) => (
+                <Animated.View
+                  key={i}
+                  style={{
+                    width: 5,
+                    height: 40,
+                    borderRadius: 3,
+                    backgroundColor: C.light,
+                    transform: [{ scaleY: anim }],
+                    opacity: 0.85,
+                  }}
+                />
+              ))}
+            </View>
+
+            {/* Silence countdown bar */}
+            {silenceCountdown > 0 && (
+              <View style={{ width: '100%', marginTop: 4 }}>
+                <Text style={{ fontSize: 9, color: C.textDim, letterSpacing: 0.5, marginBottom: 3, textAlign: 'center' }}>
+                  AUTO-STOPPING...
+                </Text>
+                <View style={{ height: 3, backgroundColor: C.border, borderRadius: 2, overflow: 'hidden' }}>
+                  <View style={{
+                    height: 3,
+                    width: silenceBarWidth,
+                    backgroundColor: C.important,
+                    borderRadius: 2,
+                  }} />
+                </View>
+              </View>
+            )}
+          </View>
+        )}
 
         {/* Transcript */}
         {transcript ? (
@@ -1147,21 +1185,24 @@ function VoiceAssistant({ visible, onClose }) {
         <View style={s.voiceMicWrap}>
           <Animated.View style={[
             s.voiceMicRing,
-            phase === 'listening' && { borderColor: C.light + '88' },
-            phase === 'confirmed' && { borderColor: C.light + '55' },
-            { transform: [{ scale: pulseAnim }] }
+            phase === 'listening'  && { borderColor: C.light + '88' },
+            phase === 'confirmed'  && { borderColor: C.light + '55' },
+            { transform: [{ scale: pulseAnim }] },
           ]}>
             <TouchableOpacity
               style={[
                 s.voiceMicBtn,
-                phase === 'listening' && { backgroundColor: C.critical },
-                phase === 'confirmed' && { backgroundColor: C.light + 'CC' },
+                phase === 'listening'  && { backgroundColor: C.critical },
+                phase === 'confirmed'  && { backgroundColor: C.light + 'CC' },
               ]}
               onPress={handleMicPress}
               activeOpacity={0.8}
             >
               <Text style={s.voiceMicIcon}>
-                {phase === 'idle' ? '🎤' : phase === 'listening' ? '⏹' : phase === 'processing' ? '⏳' : '✓'}
+                {phase === 'idle'       ? '🎤'
+                : phase === 'listening' ? '⏹'
+                : phase === 'processing'? '⏳'
+                :                        '✓'}
               </Text>
             </TouchableOpacity>
           </Animated.View>
@@ -1170,13 +1211,14 @@ function VoiceAssistant({ visible, onClose }) {
         {/* Hint */}
         <Text style={s.voiceHint}>
           {phase === 'listening'
-            ? 'Auto-stops after 10 seconds'
+            ? 'Stops automatically when you pause · tap ⏹ to cancel'
             : phase === 'confirmed'
-            ? 'Tap mic to log another item'
+            ? 'Tap mic to log another · tap mic to interrupt reply'
             : phase === 'idle'
             ? 'Say a task, event, expense, or question'
             : ''}
         </Text>
+
       </View>
     </View>
   );
@@ -2610,7 +2652,7 @@ function MoreScreen() {
             <View style={{ marginTop: 16, backgroundColor: C.bgCard, borderWidth: 1, borderColor: C.border, borderRadius: 14, padding: 16, gap: 10 }}>
               <Text style={{ fontSize: 11, fontWeight: '800', color: C.textDim, letterSpacing: 1.5 }}>SYSTEM INFO</Text>
               {[
-                { label: 'App Version', value: 'v0.4 · Session 013' },
+                { label: 'App Version', value: 'v0.5 · Session 017' },
                 { label: 'Backend',     value: 'Railway · Online' },
                 { label: 'Data Source', value: 'Google Sheets' },
                 { label: 'Built by',    value: 'Rey & Claude · MCPro' },
