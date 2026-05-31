@@ -54,27 +54,27 @@ async function backendFetch(path, options = {}) {
 
 // ─── COLOR SYSTEM ─────────────────────────────────────────────────────────────
 const C = {
-  bg:         '#0A0C10',
-  bgCard:     '#111318',
-  bgCardAlt:  '#161A22',
-  border:     '#1E2330',
+  bg:         '#FFFFFF',
+  bgCard:     '#F8FAFC',
+  bgCardAlt:  '#F1F5F9',
+  border:     '#E2E8F0',
   critical:   '#FF3B3B',
-  criticalBg: '#1A0A0A',
+  criticalBg: '#FEF2F2',
   important:  '#FF8C00',
-  importantBg:'#1A1100',
-  normal:     '#F5C842',
-  normalBg:   '#181500',
+  importantBg:'#FFF7ED',
+  normal:     '#D97706',
+  normalBg:   '#FEFCE8',
   light:      '#4ADE80',
-  lightBg:    '#081410',
+  lightBg:    '#F0FDF4',
   muted:      '#6B7280',
-  mutedBg:    '#0F1015',
-  accent:     '#3B82F6',
-  accentSoft: '#1E2D45',
-  text:       '#F0F2F5',
-  textSub:    '#8B95A8',
-  textDim:    '#4A5568',
-  navBg:      '#0D1017',
-  navBorder:  '#1A2035',
+  mutedBg:    '#F9FAFB',
+  accent:     '#10B981',
+  accentSoft: '#ECFDF5',
+  text:       '#001B3D',
+  textSub:    '#94A3B8',
+  textDim:    '#64748B',
+  navBg:      '#FFFFFF',
+  navBorder:  '#E2E8F0',
 };
 
 const CONTEXT_COLORS = {
@@ -620,8 +620,8 @@ function TasksScreen() {
     try {
       if (isRefresh) setRefreshing(true);
       else setLoading(true);
-      if (CONFIG.API_KEY) {
-        const liveTasks = await SheetsService.fetchAllTasks();
+      if (CONFIG.USE_BACKEND) {
+        const liveTasks = await backendFetch('/api/tasks').then(r => r.json());
         setTasks(liveTasks);
         setDataSource('live');
       } else {
@@ -1124,23 +1124,12 @@ function VoiceAssistant({ visible, onClose }) {
 
   if (!visible) return null;
 
-  const elapsedSec = (elapsedMs / 1000).toFixed(1);
   const phaseLabel = {
-    idle:       'Tap mic to speak',
-    listening:  'Listening — will stop when you pause',
-    processing: `Transcribing + classifying... ${elapsedSec}s`,
-    confirmed:  'Saved! Tap mic to log another.',
+    idle:       'Talk to Aria',
+    listening:  'Listening...',
+    processing: 'Thinking...',
+    confirmed:  'Aria is speaking',
   }[phase];
-
-  const phaseColor = {
-    idle:       C.textDim,
-    listening:  C.light,
-    processing: C.accent,
-    confirmed:  C.light,
-  }[phase];
-
-  // Silence bar — grows as silence threshold approaches
-  const silenceBarWidth = `${Math.round(silenceCountdown * 100)}%`;
 
   return (
     <View style={s.voiceOverlay}>
@@ -1148,160 +1137,67 @@ function VoiceAssistant({ visible, onClose }) {
 
         {/* Header */}
         <View style={s.voiceHeader}>
-          <Text style={s.voiceTitle}>◈ SENTRALIS VOICE</Text>
+          <Text style={s.voiceTitle}>ARIA</Text>
           <TouchableOpacity onPress={onClose} style={s.voiceCloseBtn}>
             <Text style={s.voiceCloseText}>✕</Text>
           </TouchableOpacity>
         </View>
 
         {/* Sync status */}
-        {pendingCount > 0 ? (
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8, backgroundColor: C.importantBg, borderRadius: 8, padding: 8 }}>
-            <Text style={{ fontSize: 10, color: C.important }}>⏳ {pendingCount} item{pendingCount > 1 ? 's' : ''} queued — will sync when online</Text>
-          </View>
-        ) : (
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-            <View style={s.liveDot} /><Text style={s.liveText}>ALL SYNCED</Text>
+        {pendingCount > 0 && (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8, backgroundColor: '#FFF7ED', borderRadius: 8, padding: 8 }}>
+            <Text style={{ fontSize: 10, color: '#FF8C00' }}>⏳ {pendingCount} item{pendingCount > 1 ? 's' : ''} queued — will sync when online</Text>
           </View>
         )}
 
-        {/* Status */}
-        <Text style={[s.voiceStatus, { color: phaseColor }]}>{phaseLabel}</Text>
-
-        {/* ── WAVEFORM — visible while listening ── */}
-        {phase === 'listening' && (
-          <View style={{ alignItems: 'center', marginBottom: 12 }}>
-            {/* Audio level bars */}
-            <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 5, height: 40, marginBottom: 8 }}>
-              {waveAnims.map((anim, i) => (
-                <Animated.View
-                  key={i}
-                  style={{
-                    width: 5,
-                    height: 40,
-                    borderRadius: 3,
-                    backgroundColor: C.light,
-                    transform: [{ scaleY: anim }],
-                    opacity: 0.85,
-                  }}
-                />
-              ))}
-            </View>
-
-            {/* Silence countdown bar */}
-            {silenceCountdown > 0 && (
-              <View style={{ width: '100%', marginTop: 4 }}>
-                <Text style={{ fontSize: 9, color: C.textDim, letterSpacing: 0.5, marginBottom: 3, textAlign: 'center' }}>
-                  AUTO-STOPPING...
-                </Text>
-                <View style={{ height: 3, backgroundColor: C.border, borderRadius: 2, overflow: 'hidden' }}>
-                  <View style={{
-                    height: 3,
-                    width: silenceBarWidth,
-                    backgroundColor: C.important,
-                    borderRadius: 2,
-                  }} />
-                </View>
-              </View>
-            )}
-          </View>
-        )}
-
-        {/* ── PROCESSING STATE — shows elapsed time + steps ── */}
-        {phase === 'processing' && (
-          <View style={{ marginBottom: 12, gap: 8 }}>
-            {/* Step indicators */}
-            {[
-              { label: 'Uploading audio',        doneAt: 1.0  },
-              { label: 'Groq Whisper transcribing', doneAt: 3.5  },
-              { label: 'Claude classifying',     doneAt: 5.5  },
-              { label: 'Saving to Sheets',       doneAt: 6.5  },
-            ].map((step, i) => {
-              const elapsed = elapsedMs / 1000;
-              const done    = elapsed >= step.doneAt;
-              const active  = elapsed >= (i === 0 ? 0 : [0,1.0,3.5,5.5][i]) && !done;
-              return (
-                <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <View style={{
-                    width: 16, height: 16, borderRadius: 8,
-                    backgroundColor: done ? C.light : active ? C.accent : C.border,
-                    alignItems: 'center', justifyContent: 'center',
-                  }}>
-                    {done && <Text style={{ fontSize: 9, color: '#000', fontWeight: '900' }}>✓</Text>}
-                    {active && <Text style={{ fontSize: 8, color: '#fff' }}>●</Text>}
-                  </View>
-                  <Text style={{
-                    fontSize: 11,
-                    color: done ? C.light : active ? C.text : C.textDim,
-                    fontWeight: done || active ? '600' : '400',
-                  }}>{step.label}</Text>
-                  {done && (
-                    <Text style={{ fontSize: 9, color: C.light, marginLeft: 'auto' }}>✓</Text>
-                  )}
-                </View>
-              );
-            })}
-          </View>
-        )}
-
-        {/* Transcript */}
-        {transcript ? (
-          <View style={s.voiceTranscript}>
-            <Text style={s.voiceTranscriptLabel}>YOU SAID</Text>
-            <Text style={s.voiceTranscriptText}>{transcript}</Text>
-          </View>
-        ) : null}
-
-        {/* Reply / Confirmation */}
-        {replyText ? (
-          <View style={[s.voiceReply, phase === 'confirmed' && { borderColor: C.light + '44', backgroundColor: C.lightBg }]}>
-            <Text style={[s.voiceReplyLabel, phase === 'confirmed' && { color: C.light }]}>
-              {phase === 'confirmed' ? '✓ SAVED' : 'SENTRALIS'}
+        {/* Response text — large, centered, navy */}
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 24, paddingHorizontal: 8 }}>
+          <Text style={{ fontSize: 22, fontWeight: '700', color: '#001B3D', textAlign: 'center', lineHeight: 32 }}>
+            {replyText || phaseLabel}
+          </Text>
+          {transcript ? (
+            <Text style={{ fontSize: 14, color: '#64748B', textAlign: 'center', marginTop: 16, lineHeight: 22, fontStyle: 'italic' }}>
+              "{transcript}"
             </Text>
-            <Text style={s.voiceReplyText}>{replyText}</Text>
-          </View>
-        ) : null}
+          ) : null}
+        </View>
+
+        {/* Mic button with pulsing circle */}
+        <View style={s.voiceMicWrap}>
+          {phase === 'listening' && (
+            <Animated.View style={{
+              position: 'absolute',
+              width: 120,
+              height: 120,
+              borderRadius: 60,
+              backgroundColor: '#10B981',
+              opacity: 0.15,
+              transform: [{ scale: pulseAnim }],
+            }} />
+          )}
+          <TouchableOpacity
+            style={[
+              s.voiceMicBtn,
+              phase === 'listening' && { backgroundColor: '#EF4444' },
+              phase === 'confirmed' && { backgroundColor: '#10B981' },
+            ]}
+            onPress={handleMicPress}
+            activeOpacity={0.8}
+          >
+            <Text style={s.voiceMicIcon}>
+              {phase === 'idle'        ? '🎤'
+              : phase === 'listening'  ? '⏹'
+              : phase === 'processing' ? '⏳'
+              :                         '✓'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* State label */}
+        <Text style={s.voiceStatus}>{phaseLabel}</Text>
 
         {/* Error */}
         {errorMsg ? <Text style={s.voiceError}>{errorMsg}</Text> : null}
-
-        {/* Mic Button */}
-        <View style={s.voiceMicWrap}>
-          <Animated.View style={[
-            s.voiceMicRing,
-            phase === 'listening'  && { borderColor: C.light + '88' },
-            phase === 'confirmed'  && { borderColor: C.light + '55' },
-            { transform: [{ scale: pulseAnim }] },
-          ]}>
-            <TouchableOpacity
-              style={[
-                s.voiceMicBtn,
-                phase === 'listening'  && { backgroundColor: C.critical },
-                phase === 'confirmed'  && { backgroundColor: C.light + 'CC' },
-              ]}
-              onPress={handleMicPress}
-              activeOpacity={0.8}
-            >
-              <Text style={s.voiceMicIcon}>
-                {phase === 'idle'       ? '🎤'
-                : phase === 'listening' ? '⏹'
-                : phase === 'processing'? '⏳'
-                :                        '✓'}
-              </Text>
-            </TouchableOpacity>
-          </Animated.View>
-        </View>
-
-        {/* Hint */}
-        <Text style={s.voiceHint}>
-          {phase === 'listening'
-            ? 'Stops automatically when you pause · tap ⏹ to cancel'
-            : phase === 'confirmed'
-            ? 'Tap mic to log another · tap mic to interrupt reply'
-            : phase === 'idle'
-            ? 'Say a task, event, expense, or question'
-            : ''}
-        </Text>
 
       </View>
     </View>
@@ -1343,11 +1239,11 @@ function CommandScreen() {
   const loadAll = useCallback(async (isRefresh = false) => {
     try {
       if (isRefresh) setRefreshing(true); else setLoading(true);
-      if (CONFIG.API_KEY) {
+      if (CONFIG.USE_BACKEND) {
         const [liveEvents, liveTasks, liveMoney] = await Promise.all([
-          SheetsService.fetchTodayEvents(),
-          SheetsService.fetchAllTasks(),
-          SheetsService.fetchAllMoney(),
+          backendFetch('/api/events/today').then(r => r.json()),
+          backendFetch('/api/tasks').then(r => r.json()),
+          backendFetch('/api/money').then(r => r.json()),
         ]);
         setEvents(liveEvents);
         setTasks(liveTasks);
@@ -1702,8 +1598,8 @@ function PeopleScreen() {
   const loadPeople = useCallback(async (isRefresh = false) => {
     try {
       if (isRefresh) setRefreshing(true); else setLoading(true);
-      if (CONFIG.API_KEY) {
-        const livePeople = await SheetsService.fetchAllPeople();
+      if (CONFIG.USE_BACKEND) {
+        const livePeople = await backendFetch('/api/people').then(r => r.json());
         setPeople(livePeople);
         setDataSource('live');
       } else {
@@ -2396,7 +2292,7 @@ function MoneyScreen() {
 
   const load = useCallback(async () => {
     try {
-      const data = await SheetsService.fetchAllMoney();
+      const data = await backendFetch('/api/money').then(r => r.json());
       setRecords(data);
     } catch (e) {
       console.error('MoneyScreen load error:', e);
@@ -3852,8 +3748,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!CONFIG.API_KEY) return;
-    SheetsService.fetchAllTasks()
+    if (!CONFIG.USE_BACKEND) return;
+    backendFetch('/api/tasks').then(r => r.json())
       .then(tasks => setTaskCount(tasks.filter(t => t.status === 'pending' || t.status === 'in-progress').length))
       .catch(() => {});
   }, []);
@@ -3897,7 +3793,7 @@ if (onboardingDone === false) {
 
 return (
   <SafeAreaView style={s.root}>
-    <StatusBar style="light" backgroundColor={C.bg} />
+    <StatusBar style="light" backgroundColor={'#001B3D'} />
     <View style={{ flex: 1 }}>{renderScreen()}</View>
     <View style={s.navBar}>
       {NAV_TABS.map(tab => {
@@ -3925,15 +3821,15 @@ const s = StyleSheet.create({
   screen: { flex: 1, backgroundColor: C.bg },
   screenContent: { paddingHorizontal: 16, paddingTop: 16 },
 
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 },
-  greeting: { fontSize: 22, fontWeight: '700', color: C.text, letterSpacing: -0.5 },
-  dateLabel: { fontSize: 11, color: C.textSub, marginTop: 2, letterSpacing: 0.3 },
-  voiceBtn: { width: 42, height: 42, borderRadius: 21, backgroundColor: C.accentSoft, borderWidth: 1, borderColor: C.accent + '55', alignItems: 'center', justifyContent: 'center' },
-  voiceBtnIcon: { fontSize: 18, color: C.accent },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10, backgroundColor: '#001B3D', marginHorizontal: -16, marginTop: -16, paddingHorizontal: 16, paddingTop: 16, paddingBottom: 14 },
+  greeting: { fontSize: 22, fontWeight: '700', color: '#FFFFFF', letterSpacing: -0.5 },
+  dateLabel: { fontSize: 11, color: 'rgba(255,255,255,0.65)', marginTop: 2, letterSpacing: 0.3 },
+  voiceBtn: { width: 42, height: 42, borderRadius: 21, backgroundColor: 'rgba(16,185,129,0.2)', borderWidth: 1, borderColor: 'rgba(16,185,129,0.5)', alignItems: 'center', justifyContent: 'center' },
+  voiceBtnIcon: { fontSize: 18, color: '#10B981' },
 
   liveIndicator: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10 },
-  liveDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: C.light },
-  liveText: { fontSize: 9, color: C.light, fontWeight: '700', letterSpacing: 1 },
+  liveDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#10B981' },
+  liveText: { fontSize: 9, color: '#10B981', fontWeight: '700', letterSpacing: 1 },
 
   aiStrip: { flexDirection: 'row', alignItems: 'center', backgroundColor: C.bgCard, borderWidth: 1, borderColor: C.border, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, marginBottom: 14, gap: 10 },
   aiIcon: { fontSize: 14, color: C.accent },
@@ -4038,14 +3934,14 @@ const s = StyleSheet.create({
   taglineName: { fontSize: 10, fontWeight: '900', color: C.textDim, letterSpacing: 4 },
   taglineText: { fontSize: 11, color: C.textDim, letterSpacing: 1, fontStyle: 'italic' },
 
-  navBar: { flexDirection: 'row', backgroundColor: C.navBg, borderTopWidth: 1, borderTopColor: C.navBorder, paddingBottom: Platform.OS === 'ios' ? 20 : 36, paddingTop: 8 },
+  navBar: { flexDirection: 'row', backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: '#E2E8F0', paddingBottom: Platform.OS === 'ios' ? 20 : 36, paddingTop: 8 },
   navTab: { flex: 1, alignItems: 'center', gap: 3, position: 'relative', paddingBottom: 2 },
-  navActiveLine: { position: 'absolute', top: -8, width: 24, height: 2, backgroundColor: C.accent, borderRadius: 1 },
+  navActiveLine: { position: 'absolute', top: -8, width: 24, height: 2, backgroundColor: '#10B981', borderRadius: 1 },
   navIconWrap: { position: 'relative' },
-  navIcon: { fontSize: 16, color: C.textDim },
-  navIconActive: { color: C.accent },
-  navLabel: { fontSize: 9, color: C.textDim, letterSpacing: 0.3 },
-  navLabelActive: { color: C.accent, fontWeight: '600' },
+  navIcon: { fontSize: 16, color: '#64748B' },
+  navIconActive: { color: '#10B981' },
+  navLabel: { fontSize: 9, color: '#64748B', letterSpacing: 0.3 },
+  navLabelActive: { color: '#10B981', fontWeight: '600' },
   navBadge: { position: 'absolute', top: -5, right: -8, backgroundColor: C.critical, borderRadius: 8, minWidth: 16, height: 16, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 },
   navBadgeText: { fontSize: 8, fontWeight: '900', color: '#FFF' },
 
@@ -4100,31 +3996,31 @@ const s = StyleSheet.create({
   placeholderTitle: { fontSize: 22, fontWeight: '700', color: C.textSub, letterSpacing: -0.5 },
   placeholderSub: { fontSize: 12, color: C.textDim },
 
-  // Voice Assistant
-  voiceOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.92)', justifyContent: 'flex-end', zIndex: 100 },
-  voiceCard: { backgroundColor: C.bgCard, borderTopLeftRadius: 28, borderTopRightRadius: 28, borderWidth: 1, borderColor: C.border, padding: 24, paddingBottom: 40, minHeight: 360 },
-  voiceHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  voiceTitle: { fontSize: 11, fontWeight: '800', color: C.accent, letterSpacing: 2 },
+  // Voice Assistant — Gemini-style minimalist
+  voiceOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end', zIndex: 100 },
+  voiceCard: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingBottom: 48, minHeight: 440, alignItems: 'center' },
+  voiceHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, width: '100%' },
+  voiceTitle: { fontSize: 14, fontWeight: '900', color: '#001B3D', letterSpacing: 4 },
   voiceCloseBtn: { padding: 4 },
-  voiceCloseText: { fontSize: 18, color: C.textDim },
-  voiceStatus: { fontSize: 13, fontWeight: '600', letterSpacing: 0.5, marginBottom: 20, textAlign: 'center' },
-  voiceTranscript: { backgroundColor: C.bgCardAlt, borderRadius: 12, padding: 14, marginBottom: 10 },
-  voiceTranscriptLabel: { fontSize: 9, fontWeight: '700', color: C.textDim, letterSpacing: 1.5, marginBottom: 4 },
-  voiceTranscriptText: { fontSize: 14, color: C.text, lineHeight: 20 },
-  voiceReply: { backgroundColor: C.accentSoft, borderRadius: 12, borderWidth: 1, borderColor: C.accent + '44', padding: 14, marginBottom: 10 },
-  voiceReplyLabel: { fontSize: 9, fontWeight: '700', color: C.accent, letterSpacing: 1.5, marginBottom: 4 },
-  voiceReplyText: { fontSize: 14, color: C.text, lineHeight: 20 },
-  voiceError: { fontSize: 12, color: C.critical, textAlign: 'center', marginBottom: 10 },
-  voiceMicWrap: { alignItems: 'center', marginVertical: 20 },
-  voiceMicRing: { width: 90, height: 90, borderRadius: 45, borderWidth: 2, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
-  voiceMicBtn: { width: 72, height: 72, borderRadius: 36, backgroundColor: C.accent, alignItems: 'center', justifyContent: 'center' },
-  voiceMicIcon: { fontSize: 30 },
-  voiceHint: { fontSize: 10, color: C.textDim, textAlign: 'center', letterSpacing: 0.3 },
+  voiceCloseText: { fontSize: 18, color: '#64748B' },
+  voiceStatus: { fontSize: 14, fontWeight: '600', color: '#64748B', letterSpacing: 0.5, textAlign: 'center', marginTop: 16, marginBottom: 8 },
+  voiceTranscript: { backgroundColor: '#F8FAFC', borderRadius: 12, padding: 14, marginBottom: 10, width: '100%' },
+  voiceTranscriptLabel: { fontSize: 9, fontWeight: '700', color: '#94A3B8', letterSpacing: 1.5, marginBottom: 4 },
+  voiceTranscriptText: { fontSize: 14, color: '#001B3D', lineHeight: 20 },
+  voiceReply: { backgroundColor: '#ECFDF5', borderRadius: 12, borderWidth: 1, borderColor: '#10B98133', padding: 14, marginBottom: 10, width: '100%' },
+  voiceReplyLabel: { fontSize: 9, fontWeight: '700', color: '#10B981', letterSpacing: 1.5, marginBottom: 4 },
+  voiceReplyText: { fontSize: 22, color: '#001B3D', fontWeight: '700', textAlign: 'center', lineHeight: 32 },
+  voiceError: { fontSize: 12, color: '#FF3B3B', textAlign: 'center', marginBottom: 10 },
+  voiceMicWrap: { alignItems: 'center', justifyContent: 'center', marginVertical: 8, width: 120, height: 120 },
+  voiceMicRing: { width: 100, height: 100, borderRadius: 50, borderWidth: 2, borderColor: '#E2E8F0', alignItems: 'center', justifyContent: 'center' },
+  voiceMicBtn: { width: 84, height: 84, borderRadius: 42, backgroundColor: '#10B981', alignItems: 'center', justifyContent: 'center' },
+  voiceMicIcon: { fontSize: 36 },
+  voiceHint: { fontSize: 10, color: '#94A3B8', textAlign: 'center', letterSpacing: 0.3 },
 
   // Screen headers (Money, Time, More)
-  screenHeader: { marginBottom: 12 },
-  screenTitle: { fontSize: 22, fontWeight: '700', color: C.text, letterSpacing: -0.5 },
-  screenSub: { fontSize: 11, color: C.textSub, marginTop: 2 },
+  screenHeader: { marginBottom: 12, backgroundColor: '#001B3D', marginHorizontal: -16, marginTop: -16, paddingHorizontal: 16, paddingTop: 16, paddingBottom: 14 },
+  screenTitle: { fontSize: 22, fontWeight: '700', color: '#FFFFFF', letterSpacing: -0.5 },
+  screenSub: { fontSize: 11, color: 'rgba(255,255,255,0.65)', marginTop: 2 },
 
   // Filter tabs (Money screen)
   filterTab: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: C.bgCard, borderWidth: 1, borderColor: C.border },
