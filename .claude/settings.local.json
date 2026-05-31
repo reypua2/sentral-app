@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node get-token.js)",
+      "Bash(npm install *)",
+      "Bash(npx expo *)"
+    ]
+  }
+}

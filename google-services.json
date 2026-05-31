@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "831310728248",
+    "project_id": "sentralis-8b176",
+    "storage_bucket": "sentralis-8b176.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:831310728248:android:8ac8314b28c1e35cb62acd",
+        "android_client_info": {
+          "package_name": "com.reypua11.sentralapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyACvWlBwkALOp3qTpUmOgZuRrB3Q4AlU24"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
