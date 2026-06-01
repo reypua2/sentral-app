@@ -919,7 +919,7 @@ function VoiceAssistant({ visible, onClose }) {
   // ── Speak confirmation — device TTS, no internet needed ──────────────────────
   const speakConfirmation = (text) => {
     Speech.stop();
-    Speech.speak(text, { language: 'en-PH', pitch: 1.0, rate: 1.1 });
+    Speech.speak(text, { language: 'en-PH', pitch: 1.0, rate: 0.85 });
   };
 
   // ── Start recording + VAD ─────────────────────────────────────────────────────
