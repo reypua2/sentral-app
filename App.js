@@ -1301,154 +1301,100 @@ function CommandScreen() {
 
   if (loading) {
     return (
-      <View style={s.screen}>
-        <View style={[s.header, { paddingHorizontal: 16, paddingTop: 16 }]}>
-          <View><Text style={s.greeting}>{greeting}, Rey</Text><Text style={s.dateLabel}>{dateStr}</Text></View>
+      <View style={{ flex: 1, backgroundColor: C.bg }}>
+        <View style={s.cmdHeader}>
+          <View>
+            <Text style={s.cmdGreeting}>{greeting}, Rey</Text>
+            <Text style={s.cmdDate}>{dateStr}</Text>
+          </View>
         </View>
         <LoadingState message="Syncing all modules..." />
       </View>
     );
   }
 
+  const hasUrgent = conflicts.length > 0 || overdueTasks.length > 0;
+
   return (
-    <View style={{ flex: 1 }}>
-    <ScrollView style={s.screen} contentContainerStyle={s.screenContent} showsVerticalScrollIndicator={false}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadAll(true)} tintColor={C.accent} colors={[C.accent]} />}
-    >
-      {/* ── Header ── */}
-      <View style={s.header}>
-        <View><Text style={s.greeting}>{greeting}, Rey</Text><Text style={s.dateLabel}>{dateStr}</Text></View>
-        <View style={{ flexDirection: 'row', gap: 10 }}>
-          <TouchableOpacity style={[s.voiceBtn, { backgroundColor: '#1A1F2E', borderColor: C.light + '66' }]} onPress={() => setVoiceVisible(true)}>
-            <Text style={[s.voiceBtnIcon, { color: C.light }]}>🎤</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={s.voiceBtn} onPress={() => loadAll(true)}>
-            <Text style={s.voiceBtnIcon}>↺</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {dataSource === 'live' && (
-        <View style={s.liveIndicator}><View style={s.liveDot} /><Text style={s.liveText}>LIVE · All modules synced</Text></View>
-      )}
-
-      {/* ── AI Briefing Strip ── */}
-      <View style={[s.aiStrip, (conflicts.length > 0 || overdueTasks.length > 0) && { borderColor: C.critical + '55', backgroundColor: C.criticalBg }]}>
-        <Text style={s.aiIcon}>◈</Text>
-        <Text style={s.aiText}>{buildBriefing()}</Text>
-      </View>
-
-      {/* ── Conflict Banner ── */}
-      <ConflictBanner description={conflictDesc} />
-
-      {/* ── Module Summary Row ── */}
-      <View style={s.sectionHeader}>
-        <Text style={s.sectionTitle}>TODAY AT A GLANCE</Text>
-        <Text style={s.sectionSub}>ALL CONTEXTS</Text>
-      </View>
-
-      {/* Row 1: Events + Tasks */}
-      <View style={[s.statsRow, { marginBottom: 8 }]}>
-        <View style={[s.dashCard, { borderLeftColor: C.accent }]}>
-          <Text style={s.dashCardIcon}>◷</Text>
-          <Text style={s.dashCardValue}>{events.length}</Text>
-          <Text style={s.dashCardLabel}>Events Today</Text>
-          {conflicts.length > 0 && (
-            <View style={s.dashCardAlert}><Text style={s.dashCardAlertText}>⚠ {conflicts.length} conflict{conflicts.length > 1 ? 's' : ''}</Text></View>
-          )}
-        </View>
-        <View style={[s.dashCard, { borderLeftColor: overdueTasks.length > 0 ? C.critical : C.normal }]}>
-          <Text style={s.dashCardIcon}>◻</Text>
-          <Text style={[s.dashCardValue, overdueTasks.length > 0 && { color: C.critical }]}>{pendingTasks.length}</Text>
-          <Text style={s.dashCardLabel}>Tasks Pending</Text>
-          {overdueTasks.length > 0 && (
-            <View style={[s.dashCardAlert, { backgroundColor: C.critical + '22' }]}><Text style={[s.dashCardAlertText, { color: C.critical }]}>⚠ {overdueTasks.length} overdue</Text></View>
-          )}
-        </View>
-      </View>
-
-      {/* Row 2: Money summary */}
-      <View style={[s.statsRow, { marginBottom: 14 }]}>
-        <View style={[s.dashCard, { borderLeftColor: C.light }]}>
-          <Text style={s.dashCardIcon}>▲</Text>
-          <Text style={[s.dashCardValue, { color: C.light, fontSize: 14 }]}>₱{fmt(totalIncome)}</Text>
-          <Text style={s.dashCardLabel}>Total Income</Text>
-        </View>
-        <View style={[s.dashCard, { borderLeftColor: C.critical }]}>
-          <Text style={s.dashCardIcon}>▼</Text>
-          <Text style={[s.dashCardValue, { color: C.critical, fontSize: 14 }]}>₱{fmt(totalExpense)}</Text>
-          <Text style={s.dashCardLabel}>Total Expenses</Text>
-        </View>
-        <View style={[s.dashCard, { borderLeftColor: netBalance >= 0 ? C.light : C.critical }]}>
-          <Text style={s.dashCardIcon}>◈</Text>
-          <Text style={[s.dashCardValue, { color: netBalance >= 0 ? C.light : C.critical, fontSize: 14 }]}>₱{fmt(Math.abs(netBalance))}</Text>
-          <Text style={s.dashCardLabel}>{netBalance >= 0 ? 'Net Surplus' : 'Net Deficit'}</Text>
-        </View>
-      </View>
-
-      {/* ── Top Priority Tasks ── */}
-      {pendingTasks.length > 0 && (
-        <>
-          <View style={s.sectionHeader}>
-            <Text style={s.sectionTitle}>TOP PRIORITY TASKS</Text>
-            <Text style={s.sectionSub}>{pendingTasks.length} PENDING</Text>
+    <View style={{ flex: 1, backgroundColor: C.bg }}>
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{ flexGrow: 1 }}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={() => loadAll(true)} tintColor={C.accent} colors={[C.accent]} />
+        }
+      >
+        {/* Header */}
+        <View style={s.cmdHeader}>
+          <View>
+            <Text style={s.cmdGreeting}>{greeting}, Rey</Text>
+            <Text style={s.cmdDate}>{dateStr}</Text>
           </View>
-          <View style={{ gap: 6, marginBottom: 14 }}>
-            {pendingTasks
-              .sort((a, b) => {
-                const order = { critical: 0, important: 1, normal: 2, light: 3 };
-                return (order[a.priority] ?? 2) - (order[b.priority] ?? 2);
-              })
-              .slice(0, 3)
-              .map((task) => {
-                const cfg = PRIORITY_CONFIG[task.priority] || PRIORITY_CONFIG.normal;
-                const isOverdue = SheetsService.isOverdue(task.dueDate);
-                return (
-                  <View key={task.id} style={[s.dashTaskRow, { borderLeftColor: isOverdue ? C.critical : cfg.color }]}>
-                    <View style={[s.priorityDot, { backgroundColor: cfg.color, marginTop: 2 }]} />
-                    <View style={{ flex: 1 }}>
-                      <Text style={s.dashTaskTitle} numberOfLines={1}>{task.title}</Text>
-                      <View style={{ flexDirection: 'row', gap: 8, marginTop: 2 }}>
-                        <Text style={[s.dashTaskMeta, { color: CONTEXT_COLORS[task.context] || C.accent }]}>{task.context}</Text>
-                        {isOverdue && <Text style={[s.dashTaskMeta, { color: C.critical }]}>⚠ OVERDUE</Text>}
-                        {task.dueDate && !isOverdue && <Text style={s.dashTaskMeta}>Due {formatDate(task.dueDate)}</Text>}
-                      </View>
-                    </View>
-                    <View style={[{ width: 6, alignSelf: 'stretch', borderRadius: 4, backgroundColor: cfg.color + '55' }]} />
-                  </View>
-                );
-              })}
-            {pendingTasks.length > 3 && (
-              <Text style={{ fontSize: 10, color: C.textDim, textAlign: 'center', paddingVertical: 4 }}>
-                +{pendingTasks.length - 3} more tasks — see Tasks tab
-              </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            {dataSource === 'live' && (
+              <View style={s.cmdLivePill}>
+                <View style={s.cmdLiveDot} />
+                <Text style={s.cmdLiveText}>LIVE</Text>
+              </View>
             )}
+            <TouchableOpacity style={s.cmdRefreshBtn} onPress={() => loadAll(true)}>
+              <Text style={s.cmdRefreshBtnText}>↺</Text>
+            </TouchableOpacity>
           </View>
-        </>
-      )}
-
-      {/* ── Today's Timeline ── */}
-      <View style={s.sectionHeader}>
-        <Text style={s.sectionTitle}>TODAY'S TIMELINE</Text>
-        <Text style={s.sectionSub}>ALL CONTEXTS · {events.length} EVENTS</Text>
-      </View>
-      <PriorityLegend />
-
-      {events.length > 0 ? (
-        <View style={s.timeline}>{events.map((item, i) => <TimelineItem key={item.id} item={item} index={i} />)}</View>
-      ) : (
-        <View style={s.emptyState}>
-          <Text style={s.emptyIcon}>◈</Text>
-          <Text style={s.emptyTitle}>No events today</Text>
-          <Text style={s.emptySub}>Add events to your Sentralis-Data sheet</Text>
         </View>
-      )}
 
-      <View style={s.taglineFooter}><Text style={s.taglineName}>SENTRALIS</Text><Text style={s.taglineText}>Where Everything Connects</Text></View>
-      <View style={{ height: 24 }} />
-    </ScrollView>
+        {/* Aria briefing — one line */}
+        <View style={s.cmdAriaRow}>
+          <Text style={s.cmdAriaLabel}>ARIA  · </Text>
+          <Text style={s.cmdAriaText} numberOfLines={2}>{buildBriefing()}</Text>
+        </View>
 
-    <VoiceAssistant visible={voiceVisible} onClose={() => setVoiceVisible(false)} />
+        {/* Conflict banner — only when urgent */}
+        {hasUrgent && (
+          <View style={{ paddingHorizontal: 20, marginBottom: 4 }}>
+            <ConflictBanner description={conflictDesc} />
+          </View>
+        )}
+
+        {/* Large mic button */}
+        <View style={s.cmdMicCenter}>
+          <View style={s.cmdMicRing}>
+            <TouchableOpacity
+              style={s.cmdMicBtn}
+              onPress={() => setVoiceVisible(true)}
+              activeOpacity={0.85}
+            >
+              <Text style={s.cmdMicIcon}>🎤</Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={s.cmdMicHint}>Tap to speak with Aria</Text>
+        </View>
+
+        {/* Data summary strip */}
+        <View style={s.cmdSummaryStrip}>
+          <View style={s.cmdSummaryItem}>
+            <Text style={s.cmdSummaryValue}>{events.length}</Text>
+            <Text style={s.cmdSummaryLabel}>Events today</Text>
+          </View>
+          <View style={s.cmdSummaryDivider} />
+          <View style={s.cmdSummaryItem}>
+            <Text style={[s.cmdSummaryValue, overdueTasks.length > 0 && { color: C.critical }]}>
+              {pendingTasks.length}
+            </Text>
+            <Text style={s.cmdSummaryLabel}>Tasks pending</Text>
+          </View>
+          <View style={s.cmdSummaryDivider} />
+          <View style={s.cmdSummaryItem}>
+            <Text style={[s.cmdSummaryValue, { color: netBalance >= 0 ? C.accent : C.critical, fontSize: 14 }]}>
+              ₱{fmt(Math.abs(netBalance))}
+            </Text>
+            <Text style={s.cmdSummaryLabel}>{netBalance >= 0 ? 'Surplus' : 'Deficit'}</Text>
+          </View>
+        </View>
+
+      </ScrollView>
+      <VoiceAssistant visible={voiceVisible} onClose={() => setVoiceVisible(false)} />
     </View>
   );
 }
@@ -3995,6 +3941,29 @@ const s = StyleSheet.create({
   placeholderIcon: { fontSize: 40, color: C.textDim },
   placeholderTitle: { fontSize: 22, fontWeight: '700', color: C.textSub, letterSpacing: -0.5 },
   placeholderSub: { fontSize: 12, color: C.textDim },
+
+  // Command Screen — minimalist redesign
+  cmdHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', paddingHorizontal: 24, paddingTop: Platform.OS === 'ios' ? 52 : 28, paddingBottom: 8 },
+  cmdGreeting: { fontSize: 26, fontWeight: '700', color: C.text, letterSpacing: -0.5 },
+  cmdDate: { fontSize: 12, color: C.textSub, marginTop: 3 },
+  cmdLivePill: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: C.accentSoft, borderRadius: 10, paddingHorizontal: 8, paddingVertical: 4 },
+  cmdLiveDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: C.accent },
+  cmdLiveText: { fontSize: 8, fontWeight: '700', color: C.accent, letterSpacing: 1 },
+  cmdRefreshBtn: { width: 34, height: 34, borderRadius: 17, backgroundColor: C.bgCard, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
+  cmdRefreshBtnText: { fontSize: 18, color: C.textDim },
+  cmdAriaRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingHorizontal: 24, paddingVertical: 12 },
+  cmdAriaLabel: { fontSize: 10, fontWeight: '800', color: C.accent, letterSpacing: 1.5, paddingTop: 2 },
+  cmdAriaText: { flex: 1, fontSize: 13, color: C.textDim, lineHeight: 20 },
+  cmdMicCenter: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 40 },
+  cmdMicRing: { width: 168, height: 168, borderRadius: 84, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center', marginBottom: 18 },
+  cmdMicBtn: { width: 128, height: 128, borderRadius: 64, backgroundColor: C.accent, alignItems: 'center', justifyContent: 'center', shadowColor: C.accent, shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.3, shadowRadius: 20, elevation: 10 },
+  cmdMicIcon: { fontSize: 52 },
+  cmdMicHint: { fontSize: 11, color: C.textSub, letterSpacing: 0.3 },
+  cmdSummaryStrip: { flexDirection: 'row', alignItems: 'center', marginHorizontal: 24, marginBottom: 28, backgroundColor: C.bgCard, borderRadius: 16, borderWidth: 1, borderColor: C.border, paddingVertical: 18 },
+  cmdSummaryItem: { flex: 1, alignItems: 'center', gap: 4 },
+  cmdSummaryDivider: { width: 1, height: 28, backgroundColor: C.border },
+  cmdSummaryValue: { fontSize: 20, fontWeight: '700', color: C.text, letterSpacing: -0.5 },
+  cmdSummaryLabel: { fontSize: 9, color: C.textSub, letterSpacing: 0.5, textTransform: 'uppercase' },
 
   // Voice Assistant — Gemini-style minimalist
   voiceOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end', zIndex: 100 },
