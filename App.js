@@ -3954,7 +3954,7 @@ const s = StyleSheet.create({
   cmdAriaRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingHorizontal: 24, paddingVertical: 12 },
   cmdAriaLabel: { fontSize: 10, fontWeight: '800', color: C.accent, letterSpacing: 1.5, paddingTop: 2 },
   cmdAriaText: { flex: 1, fontSize: 13, color: C.textDim, lineHeight: 20 },
-  cmdMicCenter: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 40 },
+  cmdMicCenter: { alignItems: 'center', paddingVertical: 52 },
   cmdMicRing: { width: 168, height: 168, borderRadius: 84, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center', marginBottom: 18 },
   cmdMicBtn: { width: 128, height: 128, borderRadius: 64, backgroundColor: C.accent, alignItems: 'center', justifyContent: 'center', shadowColor: C.accent, shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.3, shadowRadius: 20, elevation: 10 },
   cmdMicIcon: { fontSize: 52 },
