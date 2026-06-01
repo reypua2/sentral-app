@@ -922,27 +922,6 @@ function VoiceAssistant({ visible, onClose }) {
     Speech.speak(text, { language: 'en-PH', pitch: 1.0, rate: 1.1 });
   };
 
-  // ── Build instant confirmation text from classified data ─────────────────────
-  const buildConfirmation = (type, data, context) => {
-    const d = data || {};
-    switch (type) {
-      case 'task':
-        return `Task saved. ${d.title || 'Task'}, ${context} context.`;
-      case 'event':
-        return `Event saved. ${d.title || 'Event'}${d.time ? ', at ' + d.time : ''}.`;
-      case 'money':
-        const amt = d.amount ? `${Number(d.amount).toLocaleString()} pesos` : '';
-        const monType = d.type_money === 'income' ? 'income' : 'expense';
-        return `${monType} logged. ${amt}, ${context}.`;
-      case 'note':
-        return `Note saved. ${context} context.`;
-      case 'query':
-        return null;
-      default:
-        return `Saved to ${context}.`;
-    }
-  };
-
   // ── Start recording + VAD ─────────────────────────────────────────────────────
   const startListening = async () => {
     try {
@@ -1012,7 +991,8 @@ function VoiceAssistant({ visible, onClose }) {
         clearInterval(elapsedIntervalRef.current);
         elapsedIntervalRef.current = null;
       }
-      speakConfirmation('Got it. Saving now.');
+      const _quickReplies = ['On it.', 'Got it.', 'Sure thing.', 'Logging that now.'];
+      speakConfirmation(_quickReplies[Math.floor(Math.random() * _quickReplies.length)]);
 
       // ── BACKGROUND: Railway → Groq → Claude → Sheets ─────────────────────────
       (async () => {
@@ -1069,14 +1049,9 @@ function VoiceAssistant({ visible, onClose }) {
 
           setTranscript(transcription);
 
-          let confirmText = '';
-          if (type === 'query' && data.response_text) {
-            confirmText = data.response_text;
-          } else {
-            confirmText = buildConfirmation(type, classified, context);
-            if (confirmText) speakConfirmation(confirmText);
-          }
-          setReplyText(confirmText || data.response_text || 'Saved.');
+          const confirmText = data.response_text || '';
+          if (confirmText) speakConfirmation(confirmText);
+          setReplyText(confirmText || 'Saved.');
 
           if (transcription) {
             setHistory(prev => [
